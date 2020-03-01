@@ -1,6 +1,5 @@
 import ast
 import copy
-import re
 
 
 def uast_to_python_ast(uast) -> ast.AST:
@@ -51,8 +50,9 @@ def convert_args(args) -> ast.arguments:
     args_list = []
     for arg in args:
         assert arg[0] == 'var'
-        args_list.append(ast.arg(convert_type(arg[1]), convert_var(arg)))
-    return ast.arguments(args=args_list, varargs=None, kwarg=None, defaults=[])
+        args_list.append(ast.arg(arg[2], None))  # TODO: type annotation
+    return ast.arguments(args=args_list, vararg=None, kwonlyargs=[],
+                         kw_defaults=[], kwarg=None, defaults=[])
 
 
 def convert_type(t:str) -> type:
@@ -126,16 +126,35 @@ def convert_expr(expr) -> ast.AST:
     if expr[0] == 'invoke':
         _, _, func_name, args = expr
         args = [convert_expr(arg) for arg in args]
-        func = func_name # TODO
-        ast.Call(ast.Name(func, ast.Load()), args, [])
+        bin_ops = {'+': ast.Add, '-': ast.Sub, '*': ast.Mult, '/': ast.FloorDiv,
+                   '%': ast.Mod, '&': ast.BitAnd, '|': ast.BitOr}
+        cmp_ops = {'==': ast.Eq, '!=': ast.NotEq, '<': ast.Lt, '>': ast.Gt,
+                   '>=': ast.GtE, '<=': ast.LtE}
+        bool_ops = {'&&': ast.And, '||': ast.Or}
+        if func_name in bin_ops.keys():
+            return ast.BinOp(args[0], bin_ops[func_name](), args[1])
+        elif func_name in cmp_ops.keys():
+            return ast.Compare(args[0], [cmp_ops[func_name]()], [args[1]])
+        elif func_name in bool_ops.keys():
+            return ast.BoolOp(bool_ops[func_name](), args)
+        elif func_name == 'array_index':
+            return ast.Subscript(args[0], args[1], ast.Load())
+        elif func_name.endswith('.__init__'):
+            func = func_name[:-9]
+        elif func_name == 'array_initializer':
+            return ast.List(args, ast.Load())
+        else:
+            func = func_name
+        print("invoke " + func)
+        return ast.Call(ast.Name(func, ast.Load()), args, [])
     if expr[0] == '?:':
         _, _, condition, expr_if, expr_else = expr
         test = convert_expr(condition)
         return ast.IfExp(test, convert_expr(expr_if), convert_expr(expr_else))
     if expr[0] == 'cast':
         _, typ, exp = expr
-        func = str(convert_type(typ)) # TODO: function name for each type
-        ast.Call(ast.Name(func), [convert_expr(exp)], [])
+        func = str(convert_type(typ))  # TODO: check again
+        return ast.Call(ast.Name(func), [convert_expr(exp)], [])
 
 
 def convert_var(var) -> ast.Name:
