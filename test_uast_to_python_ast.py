@@ -30,14 +30,15 @@ def test_trainB(skip_partial=True):
 
 def convert_uast_to_python_code(uast):
     py_ast = uast_to_python_ast.uast_to_python_ast(uast)
-    pcode = 'import uast_utils' + astunparse.unparse(py_ast)
+    imports = 'import uast_utils\nimport math'
+    pcode = imports + astunparse.unparse(py_ast)
     return pcode
 
 
 def test_input(input, output, code):
     # TODO: remove global
     global ret
-    cmd = code + '\n\nglobal ret\nret = main(' + str(input)[1:-1] + ')'
+    cmd = '{}\n\nglobal ret\nret = main({})'.format(code, str(input)[1:-1])
     exec(cmd, globals())
     print(ret)
     return str(ret).strip() == str(output).strip()

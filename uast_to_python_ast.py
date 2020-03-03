@@ -156,14 +156,8 @@ def convert_expr(expr) -> ast.AST:
                 func = expr[1]
         elif func_name.endswith('.__init__'):
             func = func_name[:-9]
-        elif func_name == 'array_initializer':
-            return ast.List(args, ast.Load())
-        elif func_name == 'array_push':
-            return ast.Call(ast.Attribute(args[0], 'append', ast.Load()), [args[1]], [])
-        elif func_name == 'array_index':
-            return ast.Subscript(args[0], args[1], ast.Load())
-        elif func_name == 'sort':
-            func = 'sorted'
+        elif func_name in default_funcs.keys():
+            return get_funcs_ast(func_name, args)
         else:
             func = func_name
         print("invoke " + func)
@@ -182,4 +176,55 @@ def convert_var(var) -> ast.Name:
     return ast.Name(var[2], ast.Load())
 
 
+def get_funcs_ast(func_name, args) -> ast.AST:
+    func_str = default_funcs[func_name]
+    func_ast = ast.parse(func_str).body[0]
+    modified_ast = VariableSubstitutor(args).visit(func_ast)
+    if isinstance(modified_ast, ast.Expr):
+        return modified_ast.value
+    else:
+        return modified_ast
+
+
+class VariableSubstitutor(ast.NodeTransformer):
+    def __init__(self, args):
+        self.args = args
+
+    def visit_Name(self, node):
+        if node.id.startswith('x'):
+            arg_num = int(node.id[1:])
+            assert arg_num < len(self.args)
+            return self.args[arg_num]
+        else:
+            return node
+
+
+default_funcs = {
+    'str': 'str(x0)',
+    'len': 'len(x0)',
+    'sqrt': 'math.sqrt(x0)',
+    'log': 'math.log(x0)',
+    'atan2': 'math.atan2(x0, x1)',
+    'sin': 'math.sin(x0)',
+    'cos': 'math.cos(x0)',
+    'pow': 'x0 ** x1',
+    'round': 'math.floor(x0 + 0.5)',
+    'floor': 'math.floor(x0)',
+    'ceil': 'math.ceil(x0)',
+    'min': 'min(x0, x1)',
+    'max': 'max(x0, x1)',
+    'abs': 'abs(x0)',
+    'reverse': 'list(reversed(x0)) if not isinstance(x0, six.string_types) else ''.join(reversed(x0))',
+    'lower': 'x0.lower()',
+    'upper': 'x0.upper()',
+    'sort': 'sorted(x0)',
+    'array_initializer': '[]',
+    'array_index': 'x0[x1]',
+    'array_push': 'x0.append(x1)',
+    'array_pop': 'x0.pop()',
+    'array_insert': 'x0.insert(x1, x2)',
+    'array_find': 'x0.index(x1) if x1 in x0 else -1',
+    'array_find_next': 'x0.index(x1, x2) if x1 in x0[x2:] else -1',
+    'array_concat': 'x0 + x1'
+}
 
