@@ -37,7 +37,8 @@ def convert_uast_to_python_code(uast):
 def test_input(input, output, code):
     # TODO: remove global
     global ret
-    exec(code + '\n\nglobal ret\nret = main(' + str(input)[1:-1] + ')')
+    cmd = code + '\n\nglobal ret\nret = main(' + str(input)[1:-1] + ')'
+    exec(cmd, globals())
     print(ret)
     return str(ret).strip() == str(output).strip()
 

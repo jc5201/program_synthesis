@@ -17,7 +17,7 @@ def convert_program(program) -> list:
         raise AssertionError("Invalid UAST: invalid types, funcs in program")
 
     elif len(types) == 1:
-        assert types[0][2] == '__globals__'
+        assert types[0][1] == '__globals__'
         global_variables = list(types[0][2].keys())
         body.append(ast.Global(global_variables))
 
@@ -130,7 +130,8 @@ def convert_expr(expr) -> ast.AST:
         _, _, func_name, args = expr
         args = [convert_expr(arg) for arg in args]
         bin_ops = {'+': ast.Add, '-': ast.Sub, '*': ast.Mult, '/': ast.FloorDiv,
-                   '%': ast.Mod, '&': ast.BitAnd, '|': ast.BitOr}
+                   '%': ast.Mod, '&': ast.BitAnd, '|': ast.BitOr, 'pow': ast.Pow,
+                   '<<': ast.LShift, '>>': ast.RShift, '^': ast.BitXor}
         cmp_ops = {'==': ast.Eq, '!=': ast.NotEq, '<': ast.Lt, '>': ast.Gt,
                    '>=': ast.GtE, '<=': ast.LtE}
         bool_ops = {'&&': ast.And, '||': ast.Or}
@@ -142,7 +143,11 @@ def convert_expr(expr) -> ast.AST:
             return ast.BoolOp(bool_ops[func_name](), args)
         elif func_name == '_ctor':
             if convert_type(expr[1]) == list:
-                return ast.List([], ast.Load())
+                if len(args) == 0:
+                    return ast.List([], ast.Load())
+                else:
+                    elt = ast.List([ast.Constant(None, None)], ast.Load())
+                    return ast.BinOp(elt, ast.Mult(), args[0])
             elif convert_type(expr[1]) == dict:
                 return ast.Dict([], [])
             elif convert_type(expr[1]) == set:
@@ -175,4 +180,6 @@ def convert_expr(expr) -> ast.AST:
 
 def convert_var(var) -> ast.Name:
     return ast.Name(var[2], ast.Load())
+
+
 
