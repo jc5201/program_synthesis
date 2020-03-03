@@ -4,27 +4,33 @@ import astunparse
 
 
 def main():
-    with open('naps_example_trainB.jsonl', 'r') as json_file:
+    test_trainB()
+
+
+def test_trainB(skip_partial=True):
+    with open('naps.trainB.1.0.jsonl', 'r') as json_file:
         json_list = list(json_file)
 
-    data = []
-    for json_str in json_list:
-        data.append(json.loads(json_str))
-    uast1 = data[0]['code_tree']
+    for i, json_str in enumerate(json_list):
+        print("Start data#" + str(i))
+        data = json.loads(json_str)
 
-    pcode1 = convert_uast_to_python_code(uast1)
-    print(pcode1)
+        if skip_partial and data['is_partial']:
+            print("Skipping data#" + str(i))
+            continue
+        uast = data['code_tree']
+        pcode = convert_uast_to_python_code(uast)
 
-    for test in data[0]['tests']:
-        input = test['input']
-        output = test['output']
-        if not test_input(input, output, pcode1):
-            print("Failed")
-
+        for j, test in enumerate(data['tests']):
+            input = test['input']
+            output = test['output']
+            if not test_input(input, output, pcode):
+                print("Failed: data#" + str(i) + ', test case#' + str(j))
+                exit(-1)
 
 def convert_uast_to_python_code(uast):
     py_ast = uast_to_python_ast.uast_to_python_ast(uast)
-    pcode = astunparse.unparse(py_ast)
+    pcode = 'import uast_utils' + astunparse.unparse(py_ast)
     return pcode
 
 
@@ -32,8 +38,8 @@ def test_input(input, output, code):
     # TODO: remove global
     global ret
     exec(code + '\n\nglobal ret\nret = main(' + str(input)[1:-1] + ')')
-    # print(ret)
-    return ret.strip() == output.strip()
+    print(ret)
+    return str(ret).strip() == str(output).strip()
 
 
 main()

@@ -59,7 +59,7 @@ def convert_type(t:str) -> type:
     if t.startswith('<'):
         return dict
     elif '*' in t:
-        return list[convert_type(t[:-1])]
+        return list
     elif '%' in t:
         return set
     elif '#' in t:
@@ -100,13 +100,16 @@ def convert_stmt(stmt) -> ast.AST:
     elif stmt[0] == 'noop':
         return ast.Pass
     else:
-        return convert_expr(stmt)
+        return ast.Expr(convert_expr(stmt))
 
 
 def convert_expr(expr) -> ast.AST:
     if expr[0] == 'assign':
         _, _, lhs, rhs = expr
-        return ast.Assign([convert_expr(lhs)], convert_expr(rhs))
+        if lhs[0] == 'var':
+            return ast.NamedExpr(convert_expr(lhs), convert_expr(rhs))
+        else:
+            return ast.Assign([convert_expr(lhs)], convert_expr(rhs))
     if expr[0] == 'var':
         return convert_var(expr)
     if expr[0] == 'field':
@@ -116,13 +119,13 @@ def convert_expr(expr) -> ast.AST:
         _, typ, value = expr
         if typ == 'bool':
             if value == 'true':
-                return ast.NameConstant(True)
+                return ast.Constant(True, 'b')
             else:
-                return ast.NameConstant(False)
+                return ast.Constant(False, 'b')
         elif typ == 'str':
-            return ast.Str(value)
+            return ast.Constant(value, 'u')
         else:
-            return ast.Num(value)
+            return ast.Constant(value, 'n')
     if expr[0] == 'invoke':
         _, _, func_name, args = expr
         args = [convert_expr(arg) for arg in args]
@@ -131,18 +134,31 @@ def convert_expr(expr) -> ast.AST:
         cmp_ops = {'==': ast.Eq, '!=': ast.NotEq, '<': ast.Lt, '>': ast.Gt,
                    '>=': ast.GtE, '<=': ast.LtE}
         bool_ops = {'&&': ast.And, '||': ast.Or}
-        if func_name in bin_ops.keys():
+        if func_name in bin_ops.keys(): # TODO: if float, '/' ast.Div
             return ast.BinOp(args[0], bin_ops[func_name](), args[1])
         elif func_name in cmp_ops.keys():
             return ast.Compare(args[0], [cmp_ops[func_name]()], [args[1]])
         elif func_name in bool_ops.keys():
             return ast.BoolOp(bool_ops[func_name](), args)
-        elif func_name == 'array_index':
-            return ast.Subscript(args[0], args[1], ast.Load())
+        elif func_name == '_ctor':
+            if convert_type(expr[1]) == list:
+                return ast.List([], ast.Load())
+            elif convert_type(expr[1]) == dict:
+                return ast.Dict([], [])
+            elif convert_type(expr[1]) == set:
+                return ast.Set([])
+            else:
+                func = expr[1]
         elif func_name.endswith('.__init__'):
             func = func_name[:-9]
         elif func_name == 'array_initializer':
             return ast.List(args, ast.Load())
+        elif func_name == 'array_push':
+            return ast.Call(ast.Attribute(args[0], 'append', ast.Load()), [args[1]], [])
+        elif func_name == 'array_index':
+            return ast.Subscript(args[0], args[1], ast.Load())
+        elif func_name == 'sort':
+            func = 'sorted'
         else:
             func = func_name
         print("invoke " + func)
