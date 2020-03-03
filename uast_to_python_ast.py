@@ -19,7 +19,9 @@ def convert_program(program) -> list:
     elif len(types) == 1:
         assert types[0][1] == '__globals__'
         global_variables = list(types[0][2].keys())
-        body.append(ast.Global(global_variables))
+        body.append(get_ast_from_string('__globals__ = dict()'))
+        for var in global_variables:
+            body.append(get_ast_from_string('__globals__["{}"] = None'.format(var)))
 
     for func in funcs:
         if func[2] == '__globals__.__init__':
@@ -91,14 +93,14 @@ def convert_stmt(stmt) -> ast.AST:
         node = ast.While(while_test, while_body, [])
         return node
     elif stmt[0] == 'break':
-        return ast.Break
+        return ast.Break()
     elif stmt[0] == 'continue':
-        return ast.Continue
+        return ast.Continue()
     elif stmt[0] == 'return':
         _, _, expr = stmt
         return ast.Return(convert_expr(expr))
     elif stmt[0] == 'noop':
-        return ast.Pass
+        return ast.Pass()
     else:
         return ast.Expr(convert_expr(stmt))
 
@@ -114,7 +116,10 @@ def convert_expr(expr) -> ast.AST:
         return convert_var(expr)
     if expr[0] == 'field':
         _, _, exp, field = expr
-        return ast.Attribute(convert_expr(exp), field, ast.Load())
+        if exp[2] == '__globals__':
+            return ast.Subscript(ast.Name('__globals__'), ast.Constant(field, 'u'), ast.Load())
+        else:
+            return ast.Attribute(convert_expr(exp), field, ast.Load())
     if expr[0] == 'val':
         _, typ, value = expr
         if typ == 'bool':
@@ -127,18 +132,31 @@ def convert_expr(expr) -> ast.AST:
         else:
             return ast.Constant(value, 'n')
     if expr[0] == 'invoke':
-        _, _, func_name, args = expr
-        args = [convert_expr(arg) for arg in args]
-        bin_ops = {'+': ast.Add, '-': ast.Sub, '*': ast.Mult, '/': ast.FloorDiv,
+        _, _, func_name, arguments = expr
+        args = [convert_expr(arg) for arg in arguments]
+        bin_ops = {'+': ast.Add, '-': ast.Sub, '*': ast.Mult, '/': ast.Div,
                    '%': ast.Mod, '&': ast.BitAnd, '|': ast.BitOr, 'pow': ast.Pow,
                    '<<': ast.LShift, '>>': ast.RShift, '^': ast.BitXor}
         cmp_ops = {'==': ast.Eq, '!=': ast.NotEq, '<': ast.Lt, '>': ast.Gt,
                    '>=': ast.GtE, '<=': ast.LtE}
         bool_ops = {'&&': ast.And, '||': ast.Or}
-        if func_name in bin_ops.keys(): # TODO: if float, '/' ast.Div
+        if func_name in bin_ops.keys():
+            if func_name == '/' and arguments[0][1] == 'int' and arguments[0][1] == 'int':
+                return ast.BinOp(args[0], ast.FloorDiv(), args[1])
             return ast.BinOp(args[0], bin_ops[func_name](), args[1])
         elif func_name in cmp_ops.keys():
-            return ast.Compare(args[0], [cmp_ops[func_name]()], [args[1]])
+            if func_name == '==' or func_name == '!=':
+                if arguments[0][1] == 'char':
+                    left = ast.Call(ast.Name('ord', ast.Load()), [args[0]], [])
+                else:
+                    left = args[0]
+                if arguments[1][1] == 'char':
+                    right = ast.Call(ast.Name('ord', ast.Load()), [args[1]], [])
+                else:
+                    right = args[1]
+            else:
+                left, right = args[0], args[1]
+            return ast.Compare(left, [cmp_ops[func_name]()], [right])
         elif func_name in bool_ops.keys():
             return ast.BoolOp(bool_ops[func_name](), args)
         elif func_name == '_ctor':
@@ -146,7 +164,7 @@ def convert_expr(expr) -> ast.AST:
                 if len(args) == 0:
                     return ast.List([], ast.Load())
                 else:
-                    elt = ast.List([ast.Constant(None, None)], ast.Load())
+                    elt = ast.List([ast.Constant(0, 'n')], ast.Load())
                     return ast.BinOp(elt, ast.Mult(), args[0])
             elif convert_type(expr[1]) == dict:
                 return ast.Dict([], [])
@@ -158,6 +176,9 @@ def convert_expr(expr) -> ast.AST:
             func = func_name[:-9]
         elif func_name in default_funcs.keys():
             return get_funcs_ast(func_name, args)
+        elif func_name == 'array_initializer':
+            args = [convert_expr(arg) for arg in arguments]
+            return ast.List(args, ast.Load())
         else:
             func = func_name
         print("invoke " + func)
@@ -178,12 +199,16 @@ def convert_var(var) -> ast.Name:
 
 def get_funcs_ast(func_name, args) -> ast.AST:
     func_str = default_funcs[func_name]
-    func_ast = ast.parse(func_str).body[0]
-    modified_ast = VariableSubstitutor(args).visit(func_ast)
-    if isinstance(modified_ast, ast.Expr):
-        return modified_ast.value
+    func_ast = get_ast_from_string(func_str)
+    return VariableSubstitutor(args).visit(func_ast)
+
+
+def get_ast_from_string(s):
+    tree = ast.parse(s).body[0]
+    if isinstance(tree, ast.Expr):
+        return tree.value
     else:
-        return modified_ast
+        return tree
 
 
 class VariableSubstitutor(ast.NodeTransformer):
@@ -200,6 +225,7 @@ class VariableSubstitutor(ast.NodeTransformer):
 
 
 default_funcs = {
+
     'str': 'str(x0)',
     'len': 'len(x0)',
     'sqrt': 'math.sqrt(x0)',
@@ -214,17 +240,39 @@ default_funcs = {
     'min': 'min(x0, x1)',
     'max': 'max(x0, x1)',
     'abs': 'abs(x0)',
-    'reverse': 'list(reversed(x0)) if not isinstance(x0, six.string_types) else ''.join(reversed(x0))',
+    'reverse': 'list(reversed(x0))',
     'lower': 'x0.lower()',
     'upper': 'x0.upper()',
     'sort': 'sorted(x0)',
-    'array_initializer': '[]',
+    'copy_range': '[i for i in x0[x1:x2]]',
+    'contains': 'x1 in x0',
+    'concat': 'x0 + x1',
+
     'array_index': 'x0[x1]',
     'array_push': 'x0.append(x1)',
     'array_pop': 'x0.pop()',
     'array_insert': 'x0.insert(x1, x2)',
     'array_find': 'x0.index(x1) if x1 in x0 else -1',
     'array_find_next': 'x0.index(x1, x2) if x1 in x0[x2:] else -1',
-    'array_concat': 'x0 + x1'
+    'array_concat': 'x0 + x1',
+
+    'string_find': 'x0.find(x1)',
+    'string_find_last': 'x0.rfind(x1)',
+    'string_replace_one': 'x0.replace(x1, x2, 1)',
+    'string_replace_all': 'x0.replace(x1, x2)',
+    'string_insert': 'x0[:x1] + x2 + x0[x1:]',
+    'string_split': 'x0.split(x1) if x1 != "" else [i for i in x0]',
+    'string_trim': 'x0.strip()',
+    'substring': 'x0[x1:x2]',
+    'substring_end': 'x0[x1:]',
+
+    'set_push': 'x0.add(x1)',
+    'set_remove': 'x0.remove(x1)',
+    'map_has_key': 'x1 in x0',
+    'map_get': 'x0[x1] if x1 in x0 else None',
+    'map_put': 'x0[x1] = x2',
+    'map_keys': 'list(x0.keys())',
+    'map_values': 'list(x0.values())',
+
 }
 

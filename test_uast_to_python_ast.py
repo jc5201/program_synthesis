@@ -4,14 +4,16 @@ import astunparse
 
 
 def main():
-    test_trainB()
+    test_trainB(start_idx=0)
 
 
-def test_trainB(skip_partial=True):
+def test_trainB(start_idx=0, skip_partial=True):
     with open('naps.trainB.1.0.jsonl', 'r') as json_file:
         json_list = list(json_file)
 
     for i, json_str in enumerate(json_list):
+        if i < start_idx:
+            continue
         print("Start data#" + str(i))
         data = json.loads(json_str)
 
