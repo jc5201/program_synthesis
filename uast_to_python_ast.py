@@ -2,6 +2,8 @@ import ast
 import copy
 
 
+call_utils_func = lambda x, y: ast.Call(ast.Attribute(ast.Name('uast_utils'), x, ast.Load()), y, [])
+
 def uast_to_python_ast(uast) -> ast.AST:
     tree = ast.Module()
     tree.body = convert_program(uast)
@@ -58,14 +60,14 @@ def convert_args(args) -> ast.arguments:
 
 
 def convert_type(t:str) -> type:
-    if t.startswith('<'):
-        return dict
-    elif '*' in t:
+    if t.endswith('*'):
         return list
-    elif '%' in t:
+    elif t.endswith('%'):
         return set
-    elif '#' in t:
+    elif t.endswith('#'):
         raise Exception("type __global__ triggered")
+    elif t.startswith('<'):
+        return dict
     else:
         type_map = {'bool': bool, 'char': chr, 'int': int, 'real': float}
         return type_map[t]
@@ -110,6 +112,11 @@ def convert_expr(expr) -> ast.AST:
         _, _, lhs, rhs = expr
         if lhs[0] == 'var':
             return ast.NamedExpr(convert_expr(lhs), convert_expr(rhs))
+        elif lhs[0] == 'invoke' and lhs[1] == 'char' and lhs[2] == 'array_index':
+            array = convert_expr(lhs[3][0])
+            idx = convert_expr(lhs[3][1])
+            val = convert_expr(rhs)
+            return ast.Assign([array], call_utils_func('replace_string_at', [array, idx, val]))
         else:
             return ast.Assign([convert_expr(lhs)], convert_expr(rhs))
     if expr[0] == 'var':
@@ -123,7 +130,7 @@ def convert_expr(expr) -> ast.AST:
     if expr[0] == 'val':
         _, typ, value = expr
         if typ == 'bool':
-            if value == 'true':
+            if value == True:
                 return ast.Constant(True, 'b')
             else:
                 return ast.Constant(False, 'b')
@@ -141,35 +148,40 @@ def convert_expr(expr) -> ast.AST:
                    '>=': ast.GtE, '<=': ast.LtE}
         bool_ops = {'&&': ast.And, '||': ast.Or}
         if func_name in bin_ops.keys():
-            if func_name == '/' and arguments[0][1] == 'int' and arguments[0][1] == 'int':
-                return ast.BinOp(args[0], ast.FloorDiv(), args[1])
-            return ast.BinOp(args[0], bin_ops[func_name](), args[1])
-        elif func_name in cmp_ops.keys():
-            if func_name == '==' or func_name == '!=':
-                if arguments[0][1] == 'char':
-                    left = ast.Call(ast.Name('ord', ast.Load()), [args[0]], [])
-                else:
-                    left = args[0]
-                if arguments[1][1] == 'char':
-                    right = ast.Call(ast.Name('ord', ast.Load()), [args[1]], [])
-                else:
-                    right = args[1]
+            if arguments[0][1] == 'char' and arguments[1][1] == 'int':
+                left = ast.Call(ast.Name('ord', ast.Load()), [args[0]], [])
             else:
-                left, right = args[0], args[1]
+                left = args[0]
+            if arguments[1][1] == 'char' and arguments[0][1] == 'int':
+                right = ast.Call(ast.Name('ord', ast.Load()), [args[1]], [])
+            else:
+                right = args[1]
+            if func_name == '/' and arguments[0][1] == 'int' and arguments[0][1] == 'int':
+                return ast.BinOp(left, ast.FloorDiv(), right)
+            return ast.BinOp(left, bin_ops[func_name](), right)
+        elif func_name in cmp_ops.keys():
+            if arguments[0][1] == 'char' and arguments[1][1] == 'int':
+                left = ast.Call(ast.Name('ord', ast.Load()), [args[0]], [])
+            else:
+                left = args[0]
+            if arguments[1][1] == 'char' and arguments[0][1] == 'int':
+                right = ast.Call(ast.Name('ord', ast.Load()), [args[1]], [])
+            else:
+                right = args[1]
             return ast.Compare(left, [cmp_ops[func_name]()], [right])
         elif func_name in bool_ops.keys():
             return ast.BoolOp(bool_ops[func_name](), args)
         elif func_name == '_ctor':
+            if len(args) != 0:
+                l = len(args)
+                assert expr[1][-1*l:] == '*' * l
+                return call_utils_func('list_init', [ast.List(args, ast.Load())])
             if convert_type(expr[1]) == list:
-                if len(args) == 0:
-                    return ast.List([], ast.Load())
-                else:
-                    elt = ast.List([ast.Constant(0, 'n')], ast.Load())
-                    return ast.BinOp(elt, ast.Mult(), args[0])
+                func = 'list'
             elif convert_type(expr[1]) == dict:
-                return ast.Dict([], [])
+                func = 'dict'
             elif convert_type(expr[1]) == set:
-                return ast.Set([])
+                func = 'set'
             else:
                 func = expr[1]
         elif func_name.endswith('.__init__'):
@@ -225,6 +237,7 @@ class VariableSubstitutor(ast.NodeTransformer):
 
 
 default_funcs = {
+    '!': 'not x0',
 
     'str': 'str(x0)',
     'len': 'len(x0)',
@@ -261,7 +274,7 @@ default_funcs = {
     'string_replace_one': 'x0.replace(x1, x2, 1)',
     'string_replace_all': 'x0.replace(x1, x2)',
     'string_insert': 'x0[:x1] + x2 + x0[x1:]',
-    'string_split': 'x0.split(x1) if x1 != "" else [i for i in x0]',
+    'string_split': "[i for i in re.split('|'.join(map(re.escape, x1)), x0) if i]",
     'string_trim': 'x0.strip()',
     'substring': 'x0[x1:x2]',
     'substring_end': 'x0[x1:]',

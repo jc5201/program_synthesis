@@ -2,6 +2,8 @@ import json
 import uast_to_python_ast
 import astunparse
 
+skip_list = [122]
+
 
 def main():
     test_trainB(start_idx=0)
@@ -12,7 +14,7 @@ def test_trainB(start_idx=0, skip_partial=True):
         json_list = list(json_file)
 
     for i, json_str in enumerate(json_list):
-        if i < start_idx:
+        if i < start_idx or i in skip_list:
             continue
         print("Start data#" + str(i))
         data = json.loads(json_str)
@@ -27,12 +29,13 @@ def test_trainB(start_idx=0, skip_partial=True):
             input = test['input']
             output = test['output']
             if not test_input(input, output, pcode):
-                print("Failed: data#" + str(i) + ', test case#' + str(j))
+                print("Failed: data#{}, test case#{}".format(i, j))
+                print("expected '{}', got '{}'".format(output, ret))
                 exit(-1)
 
 def convert_uast_to_python_code(uast):
     py_ast = uast_to_python_ast.uast_to_python_ast(uast)
-    imports = 'import uast_utils\nimport math'
+    imports = 'import uast_utils\nimport math\nimport re'
     pcode = imports + astunparse.unparse(py_ast)
     return pcode
 
