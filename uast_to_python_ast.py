@@ -1,6 +1,6 @@
 import ast
 import copy
-
+import logging
 
 call_utils_func = lambda x, y: ast.Call(ast.Attribute(ast.Name('uast_utils'), x, ast.Load()), y, [])
 
@@ -15,6 +15,10 @@ def convert_program(program) -> list:
     funcs = program['funcs']
     body = []
     classes = {}
+
+    imports = ['uast_utils', 'math', 're']
+    for i in imports:
+        body.append(ast.Import([ast.alias(i, None)]))
 
     if not(isinstance(types, list) and isinstance(funcs, list)):
         raise AssertionError("Invalid UAST: invalid types, funcs in program")
@@ -247,7 +251,7 @@ def convert_expr(expr) -> ast.AST:
             return call_utils_func('array_remove_idx', args)
         else:
             func = func_name
-        print("invoke " + func)
+        logging.debug("invoke " + func)
         return ast.Call(ast.Name(func, ast.Load()), args, [])
     if expr[0] == '?:':
         _, _, condition, expr_if, expr_else = expr
