@@ -50,8 +50,10 @@ def gen_naps_valid(filename=naps_valid_source, skip_partial=True):
 def load_from_jsonl_file(filename, lines=[]):
     data = []
     with open(filename, 'r') as json_file:
+        if len(lines) == 0:
+            return json_file.readlines()
         for i, line in enumerate(json_file):
-            if (len(lines) == 0) or (i in lines):
+            if i in lines:
                 data.append(json.loads(line))
 
     return data

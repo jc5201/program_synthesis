@@ -10,8 +10,6 @@ class CodeSynthesisModel:
         self.text_encoder_step = 0
         self.discriminator_step = 0
 
-        self.vector_representation_loss = nn.MSELoss()
-
     def forward_text_encoder(self, x, train=True):
         if train:
             self.text_encoder_step = self.text_encoder_step + 1
@@ -24,6 +22,12 @@ class CodeSynthesisModel:
 
     def get_steps(self):
         return self.text_encoder_step + self.discriminator_step
+
+    def parameters(self):
+        params = []
+        params.append({'params': self.text_encoder.parameters()})
+        params.append({'params': self.discriminator.parameters()})
+        return params
 
 
 class TextEncoder(nn.Module):
@@ -38,7 +42,8 @@ class TextEncoder(nn.Module):
         self.lstm = nn.LSTM(self.embed_dim, lstm_hidden_dim, lstm_layer_num)
         self.ff = nn.Sequential(
             nn.ReLU(),
-            nn.Linear(lstm_hidden_dim, latent_vector_dim)
+            nn.Linear(lstm_hidden_dim, latent_vector_dim),
+            nn.BatchNorm1d(latent_vector_dim)
         )
 
     def forward(self, xs):
@@ -54,7 +59,7 @@ class Discriminator(nn.Module):
     def __init__(self, latent_vector_dim):
         super(Discriminator, self).__init__()
 
-        embed_dict_size = 500
+        embed_dict_size = 2000
         self.embed_dim = 8
         hidden_dim = 8
 
@@ -73,7 +78,8 @@ class Discriminator(nn.Module):
             nn.Tanh()
         )
         self.tail_summary = nn.Sequential(
-            nn.Linear(hidden_dim, latent_vector_dim)
+            nn.Linear(hidden_dim, latent_vector_dim),
+            nn.BatchNorm1d(latent_vector_dim)
         )
 
     def child_sum(self, tree):

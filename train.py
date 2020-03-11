@@ -8,6 +8,7 @@ import pickle
 import time
 import random
 import itertools
+import json
 
 import loader
 import model
@@ -38,7 +39,7 @@ parser.add_argument('--log-level', type=str, default='info',        # TODO
 
 args = parser.parse_args()
 
-logging.getLogger().setLevel(logging.INFO) # TODO: apply args
+logging.getLogger().setLevel(logging.DEBUG) # TODO: apply args
 formatter = logging.Formatter('[%(asctime)s][%(levelname)s|%(filename)s:%(lineno)s] >> %(message)s')
 fileHandler = logging.FileHandler('{}/{}_{}.log'.format(log_dir, args.model_name,
                                                    time.strftime('%y%m%d-%H%M%S', time.localtime(time.time()))),
@@ -66,6 +67,7 @@ def main():
         synth_model = load_model(model_name)
     else:
         synth_model = create_model(model_name)
+    optimizer = torch.optim.Adam(synth_model.parameters(), lr=1e-2)
     validation_set = range(trainA_len // 100)
     training_set = list(set(range(trainA_len)) - set(validation_set))
     target_epoch = args.epoch
@@ -73,19 +75,23 @@ def main():
     train_target = ['text']
     text_dictionary = loader.load_word_dictionary()
     code_dictionary = loader.load_code_dictionary()
+    dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
 
     for epoch in range(target_epoch):
         logging.info('start epoch #{}'.format(epoch))
         batches = make_batch(training_set, batch_size)
         loss = []
         for batch in batches:
-            raw_data = loader.load_from_jsonl_file(loader.naps_train_A, batch)
+            logging.debug('start batch {}'.format(batch))
+            optimizer.zero_grad()
+            raw_data = load_batch_from(dataset, batch)
             text_data, code_data = ready_data(raw_data, text_dictionary, code_dictionary)
             step_loss = train_vector_representation(synth_model, text_data, code_data)
+            optimizer.step()
             loss.append(step_loss)
-            logging.info("finished batch")
+            logging.debug('finished batch: train_loss: {}'.format(step_loss))
 
-        raw_data = loader.load_from_jsonl_file(loader.naps_train_A, validation_set)
+            raw_data = load_batch_from(dataset, validation_set)
         text_data, code_data = ready_data(raw_data, text_dictionary, code_dictionary)
         eval_loss = evaluate_vector_representation(synth_model, text_data, code_data)
 
@@ -101,18 +107,23 @@ def make_batch(training_set, batch_size):
             for i in range((len(training_set) - 1) // 10 + 1)]
 
 
+def load_batch_from(dataset, batch):
+    return [dataset[i] for i in batch]
+
+
 def ready_data(data, text_dictionary, code_dictionary):
     text_tensors = []
     code_trees = []
     for raw_data in data:
-        if 'text' in raw_data.keys():
-            text_data = ready_text_for_training(raw_data['text'], text_dictionary)
-        elif 'texts' in raw_data.keys():
-            text_data = ready_text_for_training(raw_data['texts'][0], text_dictionary)
+        parsed_data = json.loads(raw_data)
+        if 'text' in parsed_data.keys():
+            text_data = ready_text_for_training(parsed_data['text'], text_dictionary)
+        elif 'texts' in parsed_data.keys():
+            text_data = ready_text_for_training(parsed_data['texts'][0], text_dictionary)
         else:
             logging.error('unexpected data format')
             raise AssertionError
-        code_data = ready_code_for_training(raw_data['code_tree'], code_dictionary)
+        code_data = ready_code_for_training(parsed_data['code_tree'], code_dictionary)
         text_tensors.append(text_data)
         code_trees.append(code_data)
     return text_tensors, code_trees
@@ -195,7 +206,13 @@ def uast_to_node(uast, dictionary):
     elif uast[0] == 'val':
         sort = get_after_put_if_not_exist(dictionary, '<val>')
         type = get_after_put_if_not_exist(dictionary, uast[1])
-        body = get_after_put_if_not_exist(dictionary, uast[2])
+        val_str = uast[2] if isinstance(uast[2], str) else str(uast[2])
+        val_sort = get_after_put_if_not_exist(dictionary, '<val_in>')
+        if len(val_str) == 0:
+            empty_str = get_after_put_if_not_exist(dictionary, '<empty_str>')
+            body = [uast_node(sort=val_sort, body=empty_str)]
+        else:
+            body = [uast_node(sort=val_sort, body=get_after_put_if_not_exist(dictionary, char)) for char in val_str]
         return uast_node(sort=sort, type=type, body=body)
     elif uast[0] == 'invoke':
         sort = get_after_put_if_not_exist(dictionary, '<invoke>')
@@ -225,7 +242,7 @@ def get_after_put_if_not_exist(dictionary, word):
         return dictionary[word]
     else:
         dictionary[word] = len(dictionary)
-        logging.info("added {} to dictionary".format(word))
+        logging.debug('added {} to dictionary'.format(word))
         return dictionary[word]
 
 
@@ -237,15 +254,22 @@ def uast_node(sort, type=0, name=0, args=0, cond=0, body=0,
 def train_vector_representation(synth_model, input_texts, input_codes):
     vec_from_text = synth_model.forward_text_encoder(input_texts, train=True)
     _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=True)
-    loss = synth_model.vector_representation_loss(vec_from_text, vec_from_disc)
-    loss.backward()
+    loss = calculate_vector_rep_loss(vec_from_text, vec_from_disc)
+    distorted_vec = torch.cat([vec_from_text[1:, :], vec_from_text[:1, :]])
+    loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_disc)
+    (loss - loss_wrong_match).backward(retain_graph=False)
     return loss
 
 
 def evaluate_vector_representation(synth_model, input_texts, input_codes):
     vec_from_text = synth_model.forward_text_encoder(input_texts, train=False)
     _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=False)
-    return synth_model.vector_representation_loss(vec_from_text, vec_from_disc)
+    return calculate_vector_rep_loss(vec_from_text, vec_from_disc)
+
+
+def calculate_vector_rep_loss(output, target):
+    loss_f = torch.nn.MSELoss()
+    return loss_f(output, target)
 
 
 def model_exists(model_name):
