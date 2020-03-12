@@ -9,6 +9,7 @@ import time
 import random
 import itertools
 import json
+from torch.utils.tensorboard import SummaryWriter
 
 import loader
 import model
@@ -27,6 +28,8 @@ parser.add_argument('--epoch', type=int, default='20',
                     help='num of epoch to train')
 parser.add_argument('--batch_size', type=int, default='10',
                     help='batch size')
+parser.add_argument('--learning_rate', type=float, default='1e-3',
+                    help='learning rate')
 parser.add_argument('--cuda', action='store_true',        # TODO
                     help='use cuda')
 parser.add_argument('--model-name', type=str, default='',
@@ -67,7 +70,7 @@ def main():
         synth_model = load_model(model_name)
     else:
         synth_model = create_model(model_name)
-    optimizer = torch.optim.Adam(synth_model.parameters(), lr=1e-2)
+    optimizer = torch.optim.Adam(synth_model.parameters(), lr=args.learning_rate)
     validation_set = range(trainA_len // 100)
     training_set = list(set(range(trainA_len)) - set(validation_set))
     target_epoch = args.epoch
@@ -77,34 +80,44 @@ def main():
     code_dictionary = loader.load_code_dictionary()
     dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
 
+    tensorboard_writer = SummaryWriter('runs/' + model_name)
+
+    logging.info('start training. step: {}, batch size:{}, learning rate:{}'.format(
+        synth_model.get_steps(), batch_size, args.learning_rate
+    ))
+
     for epoch in range(target_epoch):
         logging.info('start epoch #{}'.format(epoch))
         batches = make_batch(training_set, batch_size)
         loss = []
-        for batch in batches:
-            logging.debug('start batch {}'.format(batch))
+        for i, batch in enumerate(batches):
+            logging.debug('start batch #{}: {}'.format(i, batch))
             optimizer.zero_grad()
             raw_data = load_batch_from(dataset, batch)
             text_data, code_data = ready_data(raw_data, text_dictionary, code_dictionary)
             step_loss = train_vector_representation(synth_model, text_data, code_data)
+
             optimizer.step()
-            loss.append(step_loss)
+            loss.append(step_loss.detach())
+            synth_model.increase_step(batch_size)
+            tensorboard_writer.add_scalar('Loss/train', step_loss.item(), synth_model.get_steps())
             logging.debug('finished batch: train_loss: {}'.format(step_loss))
 
-            raw_data = load_batch_from(dataset, validation_set)
+        raw_data = load_batch_from(dataset, validation_set)
         text_data, code_data = ready_data(raw_data, text_dictionary, code_dictionary)
         eval_loss = evaluate_vector_representation(synth_model, text_data, code_data)
 
         average_loss = sum(loss) / len(loss)
         logging.info('epoch #{}: training_loss: {}, validation_loss: {}'.format(epoch, average_loss, eval_loss))
-    loader.save_code_dictionary()
+    loader.save_code_dictionary(code_dictionary)
     save_model(model_name, synth_model)
+    tensorboard_writer.close()
 
 
 def make_batch(training_set, batch_size):
     random.shuffle(training_set)
     return [list(itertools.islice(training_set, batch_size * i, batch_size * (i + 1)))
-            for i in range((len(training_set) - 1) // 10 + 1)]
+            for i in range((len(training_set) - 1) // batch_size + 1)]
 
 
 def load_batch_from(dataset, batch):
@@ -256,7 +269,7 @@ def train_vector_representation(synth_model, input_texts, input_codes):
     _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=True)
     loss = calculate_vector_rep_loss(vec_from_text, vec_from_disc)
     distorted_vec = torch.cat([vec_from_text[1:, :], vec_from_text[:1, :]])
-    loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_disc)
+    loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_text)
     (loss - loss_wrong_match).backward(retain_graph=False)
     return loss
 

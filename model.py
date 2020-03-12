@@ -3,25 +3,23 @@ import torch.nn as nn
 
 
 class CodeSynthesisModel:
-    def __init__(self, latent_vector_dim=8):
+    def __init__(self, latent_vector_dim=16):
         self.text_encoder = TextEncoder(latent_vector_dim)
         self.discriminator = Discriminator(latent_vector_dim)
 
-        self.text_encoder_step = 0
-        self.discriminator_step = 0
+        self.step = 0
 
     def forward_text_encoder(self, x, train=True):
-        if train:
-            self.text_encoder_step = self.text_encoder_step + 1
         return self.text_encoder.forward(x)
 
     def forward_discriminator(self, tree, train=True):
-        if train:
-            self.discriminator_step = self.discriminator_step + 1
         return self.discriminator.forward(tree)
 
     def get_steps(self):
-        return self.text_encoder_step + self.discriminator_step
+        return self.step
+
+    def increase_step(self, amount=1):
+        self.step = self.step + amount
 
     def parameters(self):
         params = []
@@ -60,7 +58,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         embed_dict_size = 2000
-        self.embed_dim = 8
+        self.embed_dim = 16
         hidden_dim = 8
 
         self.embedding = nn.Embedding(embed_dict_size, self.embed_dim)
