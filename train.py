@@ -19,7 +19,7 @@ model_save_dir = './log'
 model_filename = './model.py'
 trainA_len = 16410
 
-parser=argparse.ArgumentParser()
+parser = argparse.ArgumentParser()
 parser.add_argument('--mode', type=str, default='train',        # TODO
                     help='what to do (train)')
 parser.add_argument('--model', type=str, default='text',        # TODO
@@ -95,9 +95,8 @@ def main():
             optimizer.zero_grad()
             raw_data = load_batch_from(dataset, batch)
             text_data, code_data = ready_data(raw_data, text_dictionary, code_dictionary)
-            step_loss = train_vector_representation(synth_model, text_data, code_data)
+            step_loss = train_vector_representation(synth_model, text_data, code_data, optimizer)
 
-            optimizer.step()
             loss.append(step_loss.detach())
             synth_model.increase_step(batch_size)
             tensorboard_writer.add_scalar('Loss/train', step_loss.item(), synth_model.get_steps())
@@ -264,13 +263,34 @@ def uast_node(sort, type=0, name=0, args=0, cond=0, body=0,
     return [sort, type, name, args, cond, body, body_else, body_iter, iter_foreach, target]
 
 
-def train_vector_representation(synth_model, input_texts, input_codes):
-    vec_from_text = synth_model.forward_text_encoder(input_texts, train=True)
+def train_vector_representation(synth_model, input_texts, input_codes, optimizer):
+    vec_from_text = synth_model.forward_text_encoder(input_texts, train=False).detach()
     _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=True)
     loss = calculate_vector_rep_loss(vec_from_text, vec_from_disc)
     distorted_vec = torch.cat([vec_from_text[1:, :], vec_from_text[:1, :]])
     loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_text)
-    (loss - loss_wrong_match).backward(retain_graph=False)
+    (loss - torch.clamp(loss_wrong_match, 0, 10)).backward(retain_graph=False)
+    optimizer.step()
+    optimizer.zero_grad()
+    logging.debug('train part1: loss {}, loss_wrong_match {}'.format(loss, loss_wrong_match))
+
+    vec_from_text = synth_model.forward_text_encoder(input_texts, train=True)
+    _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=False)
+    loss = calculate_vector_rep_loss(vec_from_text, vec_from_disc.detach())
+    distorted_vec = torch.cat([vec_from_text[1:, :], vec_from_text[:1, :]])
+    loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_text)
+    (loss - torch.clamp(loss_wrong_match, 0, 10)).backward(retain_graph=False)
+    optimizer.step()
+    optimizer.zero_grad()
+    logging.debug('train part2: loss {}, loss_wrong_match {}'.format(loss, loss_wrong_match))
+
+    vec_from_text = synth_model.forward_text_encoder(input_texts, train=False).detach()
+    _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=False)
+    loss = calculate_vector_rep_loss(vec_from_text, vec_from_disc.detach())
+    distorted_vec = torch.cat([vec_from_text[1:, :], vec_from_text[:1, :]])
+    loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_text)
+    logging.debug('train part3: loss {}, loss_wrong_match {}'.format(loss, loss_wrong_match))
+
     return loss
 
 
@@ -328,5 +348,6 @@ def load_model(model_name, step=None):
     return synth_model
 
 
-main()
+if __name__ == '__main__':
+    main()
 
