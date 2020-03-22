@@ -1,7 +1,8 @@
 
 token_list = ['<End>', 'funcdef', 'assign', 'return', 'if', 'for', 'while', 'call', 'var', 'val',
               'binop', 'cmpop', 'uop', 'break', 'continue',
-              '<cond>', '<stmts>', '<expr>', '<exprs>', '<var_name>', '<func_name>', '<op_name>', '<args_num>',
+              '<cond>', '<stmts>', '<expr>', '<exprs>',
+              '<var_name>', '<func_name>', '<op_name>', '<args_num>', '<const>',
               '<root>',
               '<var_type_var>', '<var_type_arg>',
               '<const_type_int>', '<const_type_float>', '<const_type_pointer>',

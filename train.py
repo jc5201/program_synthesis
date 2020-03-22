@@ -67,10 +67,9 @@ def main():
     if not model_name:
         logging.error('model name is empty')
     if model_exists(model_name):
-        synth_model = load_model(model_name)
+        synth_model, optimizer = load_model(model_name)
     else:
-        synth_model = create_model(model_name)
-    optimizer = torch.optim.Adam(synth_model.parameters(), lr=args.learning_rate)
+        synth_model, optimizer = create_model(model_name)
     validation_set = range(trainA_len // 100)
     training_set = list(set(range(trainA_len)) - set(validation_set))
     target_epoch = args.epoch
@@ -94,8 +93,8 @@ def main():
             logging.debug('start batch #{}: {}'.format(i, batch))
             optimizer.zero_grad()
             raw_data = load_batch_from(dataset, batch)
-            text_data, code_data = ready_data(raw_data, text_dictionary, code_dictionary)
-            step_loss = train_vector_representation(synth_model, text_data, code_data, optimizer)
+            text_data = ready_data(raw_data, text_dictionary)
+            step_loss = train_vector_representation(synth_model, text_data, optimizer)
 
             loss.append(step_loss.detach())
             synth_model.increase_step(batch_size)
@@ -103,8 +102,8 @@ def main():
             logging.debug('finished batch: train_loss: {}'.format(step_loss))
 
         raw_data = load_batch_from(dataset, validation_set)
-        text_data, code_data = ready_data(raw_data, text_dictionary, code_dictionary)
-        eval_loss = evaluate_vector_representation(synth_model, text_data, code_data)
+        text_data = ready_data(raw_data, text_dictionary)
+        eval_loss = evaluate_vector_representation(synth_model, text_data)
 
         average_loss = sum(loss) / len(loss)
         logging.info('epoch #{}: training_loss: {}, validation_loss: {}'.format(epoch, average_loss, eval_loss))
@@ -123,9 +122,8 @@ def load_batch_from(dataset, batch):
     return [dataset[i] for i in batch]
 
 
-def ready_data(data, text_dictionary, code_dictionary):
+def ready_data(data, text_dictionary):
     text_tensors = []
-    code_trees = []
     for raw_data in data:
         parsed_data = json.loads(raw_data)
         if 'text' in parsed_data.keys():
@@ -135,118 +133,13 @@ def ready_data(data, text_dictionary, code_dictionary):
         else:
             logging.error('unexpected data format')
             raise AssertionError
-        code_data = ready_code_for_training(parsed_data['code_tree'], code_dictionary)
         text_tensors.append(text_data)
-        code_trees.append(code_data)
-    return text_tensors, code_trees
+    return text_tensors
 
 
 def ready_text_for_training(text_data, dictionary):
     int_rep = list(map(lambda x: dictionary.get(x, 0), text_data))
     return torch.LongTensor(int_rep)
-
-
-def ready_code_for_training(code_data, dictionary):
-    assert isinstance(code_data, dict)
-    return uast_to_node(code_data, dictionary)
-
-
-def uast_to_node(uast, dictionary):
-    if isinstance(uast, dict):
-        sort = get_after_put_if_not_exist(dictionary, '<program>')
-        body = [uast_to_node(node, dictionary) for node in uast['funcs'] + uast['types']]
-        return uast_node(sort=sort, body=body)
-    elif uast[0] == 'record' or uast[0] == 'struct':
-        sort = get_after_put_if_not_exist(dictionary, '<struct>')
-        name = get_after_put_if_not_exist(dictionary, uast[1])
-        body = [uast_to_node(var, dictionary) for var in uast[2].values()]
-        return uast_node(sort=sort, name=name, body=body)
-    elif uast[0] == 'func' or uast[0] == 'ctor':
-        sort = get_after_put_if_not_exist(dictionary, '<func>')
-        type = get_after_put_if_not_exist(dictionary, uast[1])
-        name = get_after_put_if_not_exist(dictionary, uast[2])
-        args = [uast_to_node(arg, dictionary) for arg in uast[3]]
-        body = [uast_to_node(exp, dictionary) for exp in uast[5]]
-        return uast_node(sort=sort, type=type, name=name, args=args, body=body)
-    elif uast[0] == 'assign':
-        sort = get_after_put_if_not_exist(dictionary, '<assign>')
-        type = get_after_put_if_not_exist(dictionary, uast[1])
-        target = [uast_to_node(uast[2], dictionary)]
-        body = [uast_to_node(uast[3], dictionary)]
-        return uast_node(sort=sort, type=type, target=target, body=body)
-    elif uast[0] == 'var':
-        sort = get_after_put_if_not_exist(dictionary, '<var>')
-        type = get_after_put_if_not_exist(dictionary, uast[1])
-        name = get_after_put_if_not_exist(dictionary, uast[2])
-        return uast_node(sort=sort, type=type, name=name)
-    elif uast[0] == 'if':
-        sort = get_after_put_if_not_exist(dictionary, '<if>')
-        cond = [uast_to_node(uast[2], dictionary)]
-        body = [uast_to_node(node, dictionary) for node in uast[3]]
-        body_else = [uast_to_node(node, dictionary) for node in uast[4]]
-        return uast_node(sort=sort, cond=cond, body=body, body_else=body_else)
-    elif uast[0] == 'foreach':
-        sort = get_after_put_if_not_exist(dictionary, '<foreach>')
-        target = [uast_to_node(uast[2], dictionary)]
-        iter_foreach = [uast_to_node(uast[3], dictionary)]
-        body = [uast_to_node(node, dictionary) for node in uast[4]]
-        return uast_node(sort=sort, target=target, iter_foreach=iter_foreach, body=body)
-    elif uast[0] == 'while':
-        sort = get_after_put_if_not_exist(dictionary, '<while>')
-        cond = [uast_to_node(uast[2], dictionary)]
-        body = [uast_to_node(node, dictionary) for node in uast[3]]
-        body_iter = [uast_to_node(node, dictionary) for node in uast[4]]
-        return uast_node(sort=sort, cond=cond, body=body, body_iter=body_iter)
-    elif uast[0] == 'break':
-        sort = get_after_put_if_not_exist(dictionary, '<break>')
-        return uast_node(sort=sort)
-    elif uast[0] == 'continue':
-        sort = get_after_put_if_not_exist(dictionary, '<continue>')
-        return uast_node(sort=sort)
-    elif uast[0] == 'return':
-        sort = get_after_put_if_not_exist(dictionary, '<return>')
-        return uast_node(sort=sort)
-    elif uast[0] == 'noop':
-        sort = get_after_put_if_not_exist(dictionary, '<noop>')
-        return uast_node(sort=sort)
-    elif uast[0] == 'field':
-        sort = get_after_put_if_not_exist(dictionary, '<field>')
-        type = get_after_put_if_not_exist(dictionary, uast[1])
-        name = get_after_put_if_not_exist(dictionary, uast[3])
-        body = [uast_to_node(uast[2], dictionary)]
-        return uast_node(sort=sort, type=type, name=name, body=body)
-    elif uast[0] == 'val':
-        sort = get_after_put_if_not_exist(dictionary, '<val>')
-        type = get_after_put_if_not_exist(dictionary, uast[1])
-        val_str = uast[2] if isinstance(uast[2], str) else str(uast[2])
-        val_sort = get_after_put_if_not_exist(dictionary, '<val_in>')
-        if len(val_str) == 0:
-            empty_str = get_after_put_if_not_exist(dictionary, '<empty_str>')
-            body = [uast_node(sort=val_sort, body=empty_str)]
-        else:
-            body = [uast_node(sort=val_sort, body=get_after_put_if_not_exist(dictionary, char)) for char in val_str]
-        return uast_node(sort=sort, type=type, body=body)
-    elif uast[0] == 'invoke':
-        sort = get_after_put_if_not_exist(dictionary, '<invoke>')
-        type = get_after_put_if_not_exist(dictionary, uast[1])
-        name = get_after_put_if_not_exist(dictionary, uast[2])
-        args = [uast_to_node(arg, dictionary) for arg in uast[3]]
-        return uast_node(sort=sort, type=type, name=name, args=args)
-    elif uast[0] == '?:':
-        sort = get_after_put_if_not_exist(dictionary, '<ternary>')
-        type = get_after_put_if_not_exist(dictionary, uast[1])
-        cond = [uast_to_node(uast[2], dictionary)]
-        body = [uast_to_node(uast[3], dictionary)]
-        body_else = [uast_to_node(uast[4], dictionary)]
-        return uast_node(sort=sort, type=type, cond=cond, body=body, body_else=body_else)
-    elif uast[0] == 'cast':
-        sort = get_after_put_if_not_exist(dictionary, '<cast>')
-        type = get_after_put_if_not_exist(dictionary, uast[1])
-        body = [uast_to_node(uast[2], dictionary)]
-        return uast_node(sort=sort, type=type, body=body)
-    else:
-        logging.error("unexpected uast")
-        raise AssertionError
 
 
 def get_after_put_if_not_exist(dictionary, word):
@@ -258,40 +151,15 @@ def get_after_put_if_not_exist(dictionary, word):
         return dictionary[word]
 
 
-def uast_node(sort, type=0, name=0, args=0, cond=0, body=0,
-              body_else=0, body_iter=0, iter_foreach=0, target=0):
-    return [sort, type, name, args, cond, body, body_else, body_iter, iter_foreach, target]
-
-
-def train_vector_representation(synth_model, input_texts, input_codes, optimizer):
-    vec_from_text = synth_model.forward_text_encoder(input_texts, train=False).detach()
-    _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=True)
-    loss = calculate_vector_rep_loss(vec_from_text, vec_from_disc)
-    distorted_vec = torch.cat([vec_from_text[1:, :], vec_from_text[:1, :]])
-    loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_text)
-    (loss - torch.clamp(loss_wrong_match, 0, 10)).backward(retain_graph=False)
+def train_vector_representation(synth_model, input_texts, optimizer):
+    codes = synth_model.forward_generator(input_texts, train=True)
+    scores = synth_model.forward_discriminator(input_texts, codes, train=True)
+    # generate loss
+    loss.backward()
     optimizer.step()
     optimizer.zero_grad()
-    logging.debug('train part1: loss {}, loss_wrong_match {}'.format(loss, loss_wrong_match))
 
-    vec_from_text = synth_model.forward_text_encoder(input_texts, train=True)
-    _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=False)
-    loss = calculate_vector_rep_loss(vec_from_text, vec_from_disc.detach())
-    distorted_vec = torch.cat([vec_from_text[1:, :], vec_from_text[:1, :]])
-    loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_text)
-    (loss - torch.clamp(loss_wrong_match, 0, 10)).backward(retain_graph=False)
-    optimizer.step()
-    optimizer.zero_grad()
-    logging.debug('train part2: loss {}, loss_wrong_match {}'.format(loss, loss_wrong_match))
-
-    vec_from_text = synth_model.forward_text_encoder(input_texts, train=False).detach()
-    _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=False)
-    loss = calculate_vector_rep_loss(vec_from_text, vec_from_disc.detach())
-    distorted_vec = torch.cat([vec_from_text[1:, :], vec_from_text[:1, :]])
-    loss_wrong_match = calculate_vector_rep_loss(distorted_vec, vec_from_text)
-    logging.debug('train part3: loss {}, loss_wrong_match {}'.format(loss, loss_wrong_match))
-
-    return loss
+    return loss.item()
 
 
 def evaluate_vector_representation(synth_model, input_texts, input_codes):
@@ -311,6 +179,7 @@ def model_exists(model_name):
 
 def create_model(model_name):
     synth_model = model.CodeSynthesisModel()
+    optimizer = torch.optim.Adam(synth_model.parameters(), lr=args.learning_rate)
 
     model_dir = model_save_dir + '/' + model_name
     if os.path.exists(model_dir):
@@ -321,31 +190,35 @@ def create_model(model_name):
     os.mkdir(model_dir)
     shutil.copy(model_filename, model_dir)
 
-    return synth_model
+    return synth_model, optimizer
 
 
-def save_model(model_name, synth_model, step=None):
+def save_model(model_name, synth_model, optimizer, step=None):
     if step:
         model_path = model_save_dir + '/' + model_name + '/' + 'model_{}.pkl'.format(step)
+        optim_path = model_save_dir + '/' + model_name + '/' + 'optimizer_{}.pkl'.format(step)
     else:
         model_path = model_save_dir + '/' + model_name + '/' + 'model.pkl'
+        optim_path = model_save_dir + '/' + model_name + '/' + 'optimizer.pkl'
     if os.path.exists(model_path):
         os.remove(model_path)
         logging.info('deleted previous model in {}'.format(model_path))
-    with open(model_path, 'wb') as f:
-        pickle.dump(synth_model, f)
+    torch.save(synth_model, model_path)
+    torch.save(optimizer, optim_path)
     logging.info('saved model {} into {}'.format(model_name, model_path))
 
 
 def load_model(model_name, step=None):
     if step:
         model_path = model_save_dir + '/' + model_name + '/' + 'model_{}.pkl'.format(step)
+        optim_path = model_save_dir + '/' + model_name + '/' + 'optimizer_{}.pkl'.format(step)
     else:
         model_path = model_save_dir + '/' + model_name + '/' + 'model.pkl'
-    with open(model_path, 'rb') as f:
-        synth_model = pickle.load(f)
+        optim_path = model_save_dir + '/' + model_name + '/' + 'optimizer.pkl'
+    synth_model = torch.load(model_path)
+    optimizer = torch.load(optim_path)
     logging.info('loaded model {} from {}'.format(model_name, model_path))
-    return synth_model
+    return synth_model, optimizer
 
 
 if __name__ == '__main__':
