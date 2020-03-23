@@ -36,6 +36,17 @@ class CodeSynthesisModel:
         params.append({'params': self.discriminator.parameters()})
         return params
 
+    def set_generator_trainable(self, val):
+        for param in self.generator.parameters():
+            param.requires_grad = val
+
+    def set_discriminator_trainable(self, val):
+        for param in self.discriminator.parameters():
+            param.requires_grad = val
+
+    def set_text_encoder_trainable(self, val):
+        for param in self.text_encoder.parameters():
+            param.requires_grad = val
 
 class TextEncoder(nn.Module):
     def __init__(self, latent_vector_dim, lstm_out_dim):
@@ -256,7 +267,7 @@ class Generator(nn.Module):
         if self.token_list[sort.item()] == 'if':
             child = self.gen_child(sort, note, ['<cond>', '<stmts>', '<stmts>'], lstm_out, train)
         elif self.token_list[sort.item()] == 'for':
-            child = self.gen_child(sort, note, ['<expr>', '<stmts>'], lstm_out, train)
+            child = self.gen_child(sort, note, ['<expr>', '<var_name>', '<stmts>'], lstm_out, train)
         elif self.token_list[sort.item()] == 'while':
             child = self.gen_child(sort, note, ['<cond>', '<stmts>'], lstm_out, train)
         elif self.token_list[sort.item()] == 'return':

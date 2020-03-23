@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import loader
 import model
+import executor
 
 log_dir = './log'
 model_save_dir = './log'
@@ -76,7 +77,6 @@ def main():
     batch_size = args.batch_size
     train_target = ['text']
     text_dictionary = loader.load_word_dictionary()
-    code_dictionary = loader.load_code_dictionary()
     dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
 
     tensorboard_writer = SummaryWriter('runs/' + model_name)
@@ -88,26 +88,32 @@ def main():
     for epoch in range(target_epoch):
         logging.info('start epoch #{}'.format(epoch))
         batches = make_batch(training_set, batch_size)
-        loss = []
+        gen_loss_list = []
+        disc_loss_list = []
         for i, batch in enumerate(batches):
             logging.debug('start batch #{}: {}'.format(i, batch))
             optimizer.zero_grad()
             raw_data = load_batch_from(dataset, batch)
-            text_data = ready_data(raw_data, text_dictionary)
-            step_loss = train_vector_representation(synth_model, text_data, optimizer)
+            text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
+            gen_loss, dis_loss, target_score = train_vector_representation(synth_model, text_idx_data, text_data, tests, optimizer)
 
-            loss.append(step_loss.detach())
+            gen_loss_list.append(gen_loss)
+            disc_loss_list.append(dis_loss)
             synth_model.increase_step(batch_size)
-            tensorboard_writer.add_scalar('Loss/train', step_loss.item(), synth_model.get_steps())
-            logging.debug('finished batch: train_loss: {}'.format(step_loss))
+            tensorboard_writer.add_scalar('Loss/train_gen', gen_loss, synth_model.get_steps())
+            tensorboard_writer.add_scalar('Loss/train_dis', dis_loss, synth_model.get_steps())
+            tensorboard_writer.add_scalar('Loss/train_target', target_score, synth_model.get_steps())
+            logging.debug('finished batch: gen_loss: {}, dis_loss: {}, target_score: {}'.format(
+                gen_loss, dis_loss, target_score))
 
         raw_data = load_batch_from(dataset, validation_set)
         text_data = ready_data(raw_data, text_dictionary)
-        eval_loss = evaluate_vector_representation(synth_model, text_data)
+        eval_gen_loss, eval_dis_loss = evaluate_vector_representation(synth_model, text_idx_data, text_data, tests)
 
-        average_loss = sum(loss) / len(loss)
-        logging.info('epoch #{}: training_loss: {}, validation_loss: {}'.format(epoch, average_loss, eval_loss))
-    loader.save_code_dictionary(code_dictionary)
+        average_gen_loss = sum(gen_loss_list) / len(gen_loss_list)
+        average_dis_loss = sum(disc_loss_list) / len(disc_loss_list)
+        logging.info('epoch #{}: training_loss: {}, {}, validation_loss: {}, {}'.format(
+            epoch, average_gen_loss, average_dis_loss, eval_gen_loss, eval_dis_loss))
     save_model(model_name, synth_model)
     tensorboard_writer.close()
 
@@ -124,17 +130,22 @@ def load_batch_from(dataset, batch):
 
 def ready_data(data, text_dictionary):
     text_tensors = []
+    raw_texts = []
+    tests = []
     for raw_data in data:
         parsed_data = json.loads(raw_data)
         if 'text' in parsed_data.keys():
             text_data = ready_text_for_training(parsed_data['text'], text_dictionary)
+            raw_texts.append(parsed_data['text'])
         elif 'texts' in parsed_data.keys():
             text_data = ready_text_for_training(parsed_data['texts'][0], text_dictionary)
+            raw_texts.append(parsed_data['texts'][0])
         else:
             logging.error('unexpected data format')
             raise AssertionError
         text_tensors.append(text_data)
-    return text_tensors
+        tests.append(parsed_data['tests'])
+    return text_tensors, raw_texts, tests
 
 
 def ready_text_for_training(text_data, dictionary):
@@ -151,26 +162,38 @@ def get_after_put_if_not_exist(dictionary, word):
         return dictionary[word]
 
 
-def train_vector_representation(synth_model, input_texts, optimizer):
+def train_vector_representation(synth_model, input_texts, raw_input_texts, tests, optimizer):
+    synth_model.set_generator_trainable(False)
+    synth_model.set_discriminator_trainable(True)
+    optimizer.zero_grad()
     codes = synth_model.forward_generator(input_texts, train=True)
     scores = synth_model.forward_discriminator(input_texts, codes, train=True)
-    # generate loss
-    loss.backward()
+    target_score = executor.evaluate_code(codes, raw_input_texts, tests)
+    target_score = torch.Tensor(target_score)
+    disc_loss = torch.nn.MSELoss()(target_score, scores)
+    disc_loss.backward()
     optimizer.step()
+
+    synth_model.set_generator_trainable(True)
+    synth_model.set_discriminator_trainable(False)
     optimizer.zero_grad()
+    codes = synth_model.forward_generator(input_texts, train=True)
+    scores = synth_model.forward_discriminator(input_texts, codes, train=True)
+    gen_loss = -1 * scores
+    gen_loss.backward()
+    optimizer.step()
 
-    return loss.item()
+    return gen_loss.item(), disc_loss.item(), target_score.mean().item()
 
 
-def evaluate_vector_representation(synth_model, input_texts, input_codes):
-    vec_from_text = synth_model.forward_text_encoder(input_texts, train=False)
-    _, vec_from_disc = synth_model.forward_discriminator(input_codes, train=False)
-    return calculate_vector_rep_loss(vec_from_text, vec_from_disc)
-
-
-def calculate_vector_rep_loss(output, target):
-    loss_f = torch.nn.MSELoss()
-    return loss_f(output, target)
+def evaluate_vector_representation(synth_model, input_texts, raw_input_texts, tests):
+    codes = synth_model.forward_generator(input_texts, train=False)
+    scores = synth_model.forward_discriminator(input_texts, codes, train=False)
+    target_score = executor.evaluate_code(codes, raw_input_texts, tests)
+    target_score = torch.Tensor(target_score)
+    gen_loss = -1 * scores
+    disc_loss = torch.nn.MSELoss()(target_score, scores)
+    return gen_loss, disc_loss
 
 
 def model_exists(model_name):
