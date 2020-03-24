@@ -3,12 +3,15 @@ import astunparse
 import ast_gen_helper
 import torch
 
+import logging
 
-bin_ops = {'+': ast.Add(), '-': ast.Sub(), '*': ast.Mult(), '/': ast.Div(),
+
+bin_ops = {'+': ast.Add(), '-': ast.Sub(), '*': ast.Mult(), '/': ast.Div(), '//': ast.FloorDiv(),
            '%': ast.Mod(), '&': ast.BitAnd(), '|': ast.BitOr(), 'pow': ast.Pow(),
            '<<': ast.LShift(), '>>': ast.RShift(), '^': ast.BitXor()}
 cmp_ops = {'==': ast.Eq(), '!=': ast.NotEq(), '<': ast.Lt(), '>': ast.Gt(),
-           '>=': ast.GtE(), '<=': ast.LtE()}
+           '>=': ast.GtE(), '<=': ast.LtE(), 'Is': ast.Is(), 'IsNot': ast.IsNot(),
+           'In': ast.In(), 'NotIn': ast.NotIn()}
 bool_ops = {'&&': ast.And(), '||': ast.Or()}
 unary_ops = {'~': ast.Invert(), '!': ast.Not()}
 
@@ -19,15 +22,16 @@ def node_to_ast(tree, text_list):
 def rec_node_to_ast(node, text_list):
     node_type = ast_gen_helper.token_list[node[0].item()]
     children = node[2]
+    # logging.debug('node_to_ast: node_type: {}'.format(node_type))
 
     if node_type == '<root>':
         ast_node = ast.Module()
         ast_node.body = [rec_node_to_ast(child, text_list) for child in children]
         return ast_node
     elif node_type == 'funcdef':
-        assert children[0][0] == '<func_name>'
-        assert children[1][0] == '<args_num>'
-        assert children[2][0] == '<stmts>'
+        assert ast_gen_helper.token_list[children[0][0].item()] == '<func_name>'
+        assert ast_gen_helper.token_list[children[1][0].item()] == '<args_num>'
+        assert ast_gen_helper.token_list[children[2][0].item()] == '<stmts>'
         func_name = 'func' + str(children[0][2][1].item())
         args_num = children[1][2][0].item()
         args_list = [ast.arg('arg' + str(i), None) for i in range(args_num)]
@@ -64,11 +68,11 @@ def rec_node_to_ast(node, text_list):
         return ast_node
     elif node_type == 'call':
         func_type = ast_gen_helper.token_list[children[0][2][0].item()]
-        func_name = children[0][2][1].item()
+        func_idx = children[0][2][1].item()
         if func_type == '<func_type_func>':
-            ast_func_name = ast.Name('func' + str(func_name), ast.Load())
+            ast_func_name = ast.Name('func' + str(func_idx), ast.Load())
         else:
-            ast_func_name = ast.Name(ast_gen_helper.builtin_func_list[func_name], ast.Load())
+            ast_func_name = ast.Name(ast_gen_helper.builtin_func_list[func_idx], ast.Load())
         ast_args = rec_node_to_ast(children[1], text_list)
         ast_node = ast.Call(ast_func_name, ast_args, [])
         return ast_node
@@ -117,12 +121,18 @@ def rec_node_to_ast(node, text_list):
         return ast_node
     elif node_type == '<func_name>':
         func_type = ast_gen_helper.token_list[children[0].item()]
-        func_name = children[1].item()
+        func_idx = children[1].item()
         if func_type == '<func_type_func>':
-            ast_func_name = ast.Name('func' + str(func_name, ast.Load()))
+            ast_func_name = ast.Name('func' + str(func_idx, ast.Load()))
         else:
-            ast_func_name = ast.Name(ast_gen_helper.builtin_func_list[func_name], ast.Load())
+            ast_func_name = ast.Name(ast_gen_helper.builtin_func_list[func_idx], ast.Load())
         return ast_func_name
+    elif node_type == '<stmts>':
+        return [rec_node_to_ast(stmt, text_list) for stmt in children]
+    elif node_type == '<exprs>':
+        return [rec_node_to_ast(exp, text_list) for exp in children]
+    elif node_type == '<expr>' or node_type == '<cond>':
+        return rec_node_to_ast(children[0], text_list)
     else:
         assert False
 
@@ -132,7 +142,7 @@ def ast_to_code(py_ast):
 
 
 def compile_code(code):
-    compile(code, 'exec')
+    compile(code, '<string>', 'exec')
 
 
 def execute_code(code, input):
@@ -159,15 +169,17 @@ def check_equal(a, b):
 def evaluate_code(trees, texts, tests):
     scores = []
     for tree, text, test in zip(trees, texts, tests):
-        python_ast = node_to_ast(tree, text)
         try:
+            python_ast = node_to_ast(tree, text)
             code = ast_to_code(python_ast)
-        except:
+        except Exception as ex:
             scores.append(-3.0)
+            continue
         try:
             compile_code(code)
-        except:
+        except Exception as ex:
             scores.append(-2.0)
+            continue
         try:
             score = 0
             for case in test:
@@ -175,9 +187,10 @@ def evaluate_code(trees, texts, tests):
                 output = case['output']
                 result = execute_code(code, input)
                 if check_equal(result, output):
-                    score = score + 1.0 / len(inputs)
+                    score = score + 1.0 / len(tests)
             scores.append(score)
-        except:
+        except Exception as ex:
             scores.append(-1.0)
+            continue
     return scores
 

@@ -148,7 +148,7 @@ class Discriminator(nn.Module):
                 v = self.embedding(torch.cat((const_type.view(1), idx.view(1)))).view(1, -1)
                 return self.leaf_ff(v)
             else:
-                v = torch.cat((first_note, lstm_out[const_val])).view(1, -1)
+                v = torch.cat((first_note, lstm_out[const_val.item(), 0, :])).view(1, -1)
                 return self.ptr_ff(v)
         elif node_type.item() == self.token_list.index('<op_name>'):
             op_name = node_children[0]
@@ -253,7 +253,7 @@ class Generator(nn.Module):
     def predict_const_copy(self, note, lstm_out):
         l = lstm_out.size(0)
         cc = torch.cat([note.expand(l, note.size(1)), lstm_out.view(l, -1)], dim=1)
-        return nn.Softmax()(self.ptr_ff(cc).view(1, -1))
+        return nn.Softmax(dim=1)(self.ptr_ff(cc).view(1, -1))
 
     def next_node(self, parent, sibling, note, lstm_out, train):
         assert parent.size()[0] == 1

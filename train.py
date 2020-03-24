@@ -179,7 +179,7 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     optimizer.zero_grad()
     codes = synth_model.forward_generator(input_texts, train=True)
     scores = synth_model.forward_discriminator(input_texts, codes, train=True)
-    gen_loss = -1 * scores
+    gen_loss = -1 * torch.sum(scores)
     gen_loss.backward()
     optimizer.step()
 
