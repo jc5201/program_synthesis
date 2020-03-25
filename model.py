@@ -118,8 +118,7 @@ class Discriminator(nn.Module):
             nn.Linear(self.embed_dim, self.hidden_dim)
         )
         self.tail_score = nn.Sequential(
-            nn.Linear(self.hidden_dim, 1),
-            nn.Tanh()
+            nn.Linear(self.hidden_dim, 1)
         )
 
     def child_sum(self, parent_type, node, lstm_out, first_note):

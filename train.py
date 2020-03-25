@@ -4,7 +4,6 @@ import logging
 import argparse
 import os
 import shutil
-import pickle
 import time
 import random
 import itertools
@@ -27,18 +26,22 @@ parser.add_argument('--model', type=str, default='text',        # TODO
                     help='type of train target (text, generator)')
 parser.add_argument('--epoch', type=int, default='20',
                     help='num of epoch to train')
-parser.add_argument('--batch_size', type=int, default='10',
+parser.add_argument('--batch-size', type=int, default='10',
                     help='batch size')
-parser.add_argument('--learning_rate', type=float, default='1e-3',
+parser.add_argument('--learning-rate', type=float, default='1e-3',
                     help='learning rate')
 parser.add_argument('--cuda', action='store_true',        # TODO
                     help='use cuda')
 parser.add_argument('--model-name', type=str, default='',
                     help='name of train model')
+parser.add_argument('--note-dim', type=int, default='16',
+                    help='dimension of note vector')
 parser.add_argument('--disable-terminal-log', action='store_true',
                     help='do no print log to terminal')
 parser.add_argument('--log-level', type=str, default='info',        # TODO
                     help='log-level (debug, info, warning, error)')
+parser.add_argument('--save-interval', type=int, default='4000',
+                    help='model save interval')
 
 
 args = parser.parse_args()
@@ -80,6 +83,7 @@ def main():
     dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
 
     tensorboard_writer = SummaryWriter('runs/' + model_name)
+    recent_save_step = synth_model.get_steps() // args.save_interval
 
     logging.info('start training. step: {}, batch size:{}, learning rate:{}'.format(
         synth_model.get_steps(), batch_size, args.learning_rate
@@ -105,6 +109,9 @@ def main():
             tensorboard_writer.add_scalar('Loss/train_target', target_score, synth_model.get_steps())
             logging.debug('finished batch: gen_loss: {}, dis_loss: {}, target_score: {}'.format(
                 gen_loss, dis_loss, target_score))
+            if synth_model.get_steps() // args.save_interval > recent_save_step:
+                save_model(model_name, synth_model, optimizer, synth_model.get_steps())
+                recent_save_step = synth_model.get_steps() // args.save_interval
 
         raw_data = load_batch_from(dataset, validation_set)
         text_data = ready_data(raw_data, text_dictionary)
@@ -114,7 +121,7 @@ def main():
         average_dis_loss = sum(disc_loss_list) / len(disc_loss_list)
         logging.info('epoch #{}: training_loss: {}, {}, validation_loss: {}, {}'.format(
             epoch, average_gen_loss, average_dis_loss, eval_gen_loss, eval_dis_loss))
-    save_model(model_name, synth_model)
+    save_model(model_name, synth_model, optimizer)
     tensorboard_writer.close()
 
 
@@ -163,6 +170,7 @@ def get_after_put_if_not_exist(dictionary, word):
 
 
 def train_vector_representation(synth_model, input_texts, raw_input_texts, tests, optimizer):
+    synth_model.set_text_encoder_trainable(False)
     synth_model.set_generator_trainable(False)
     synth_model.set_discriminator_trainable(True)
     optimizer.zero_grad()
@@ -174,12 +182,13 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     disc_loss.backward()
     optimizer.step()
 
+    synth_model.set_text_encoder_trainable(True)
     synth_model.set_generator_trainable(True)
     synth_model.set_discriminator_trainable(False)
     optimizer.zero_grad()
     codes = synth_model.forward_generator(input_texts, train=True)
     scores = synth_model.forward_discriminator(input_texts, codes, train=True)
-    gen_loss = -1 * torch.sum(scores)
+    gen_loss = torch.sum(scores) * -1 / len(input_texts)
     gen_loss.backward()
     optimizer.step()
 
@@ -191,7 +200,7 @@ def evaluate_vector_representation(synth_model, input_texts, raw_input_texts, te
     scores = synth_model.forward_discriminator(input_texts, codes, train=False)
     target_score = executor.evaluate_code(codes, raw_input_texts, tests)
     target_score = torch.Tensor(target_score)
-    gen_loss = -1 * scores
+    gen_loss = -1 * torch.sum(scores)
     disc_loss = torch.nn.MSELoss()(target_score, scores)
     return gen_loss, disc_loss
 
@@ -201,7 +210,7 @@ def model_exists(model_name):
 
 
 def create_model(model_name):
-    synth_model = model.CodeSynthesisModel()
+    synth_model = model.CodeSynthesisModel(args.note_dim)
     optimizer = torch.optim.Adam(synth_model.parameters(), lr=args.learning_rate)
 
     model_dir = model_save_dir + '/' + model_name
