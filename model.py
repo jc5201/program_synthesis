@@ -29,11 +29,11 @@ class CodeSynthesisModel:
     def increase_step(self, amount=1):
         self.step = self.step + amount
 
-    def parameters(self):
+    def parameters(self, text_lr, gen_lr, dis_lr):
         params = []
-        params.append({'params': self.text_encoder.parameters()})
-        params.append({'params': self.generator.parameters()})
-        params.append({'params': self.discriminator.parameters()})
+        params.append({'params': self.text_encoder.parameters(), 'lr': text_lr})
+        params.append({'params': self.generator.parameters(), 'lr': gen_lr})
+        params.append({'params': self.discriminator.parameters(), 'lr': dis_lr})
         return params
 
     def set_generator_trainable(self, val):
@@ -47,6 +47,7 @@ class CodeSynthesisModel:
     def set_text_encoder_trainable(self, val):
         for param in self.text_encoder.parameters():
             param.requires_grad = val
+
 
 class TextEncoder(nn.Module):
     def __init__(self, latent_vector_dim, lstm_out_dim):
@@ -88,7 +89,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         embed_dict_size = 200
-        self.embed_dim = 32
+        self.embed_dim = 16
         self.hidden_dim = 32
         lstm_out_dim = lstm_out_dim
 
@@ -106,7 +107,8 @@ class Discriminator(nn.Module):
 
         self.embedding = nn.Embedding(embed_dict_size, self.embed_dim)
         self.leaf_ff = nn.Sequential(
-            nn.Linear(self.embed_dim * 2, self.hidden_dim)
+            nn.Linear(self.embed_dim * 2, self.hidden_dim),
+            nn.Linear(self.hidden_dim, self.hidden_dim)
         )
         self.node_ff = nn.Sequential(
             nn.Linear(self.embed_dim * 2 + self.hidden_dim, self.hidden_dim),
@@ -115,7 +117,8 @@ class Discriminator(nn.Module):
         self.ptr_ff = nn.Linear(note_dim + lstm_out_dim, self.hidden_dim)
 
         self.ff_model = nn.Sequential(
-            nn.Linear(self.embed_dim, self.hidden_dim)
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Linear(self.hidden_dim, self.hidden_dim)
         )
         self.tail_score = nn.Sequential(
             nn.Linear(self.hidden_dim, 1)
