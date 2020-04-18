@@ -40,6 +40,8 @@ parser.add_argument('--model-name', type=str, default='',
                     help='name of train model')
 parser.add_argument('--note-dim', type=int, default='16',
                     help='dimension of note vector')
+parser.add_argument('--episode-max', type=int, default='200',
+                    help='maximum length of episode')
 parser.add_argument('--disable-terminal-log', action='store_true',
                     help='do no print log to terminal')
 parser.add_argument('--log-level', type=str, default='info',        # TODO
@@ -82,6 +84,7 @@ def main():
     training_set = list(set(range(trainA_len)) - set(validation_set))
     target_epoch = args.epoch
     batch_size = args.batch_size
+    episode_max = args.episode_max
     train_target = ['text']
     text_dictionary = loader.load_word_dictionary()
     dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
@@ -97,14 +100,27 @@ def main():
     for epoch in range(target_epoch):
         logging.info('start epoch #{}'.format(epoch))
         batches = make_batch(training_set, batch_size)
+        train_idx = 0
+        text_lists = [[] for _ in range(batch_size)]
+        tree_list = torch.LongTensor([1, -1, -1]).expand(batch_size, episode_max, -1) #TODO
+        score_list = [[] for _ in range(batch_size)]
         gen_loss_list = []
         disc_loss_list = []
         for i, batch in enumerate(batches):
-            logging.debug('start batch #{}: {}'.format(i, batch))
+            #logging.debug('start batch #{}: {}'.format(i, batch))
             optimizer.zero_grad()
-            raw_data = load_batch_from(dataset, batch)
-            text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
-            gen_loss, dis_loss, target_score = train_vector_representation(synth_model, text_idx_data, text_data, tests, optimizer)
+            for text_list in text_lists:
+                if text_list == []:
+                    raw_data = load_batch_from(dataset, [train_idx])
+                    train_idx += 1
+                    text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
+                    text_list.append(text_idx_data[0])
+                    text_list.append(text_data[0])
+                    text_list.append(tests[0])
+
+            text_idx_data, text_data, tests = [e[0] for e in text_lists], [e[1] for e in text_lists], [e[2] for e in text_lists]
+            gen_loss, dis_loss, target_score = \
+                train_vector_representation(synth_model, text_idx_data, text_data, tests, tree_list, score_list, optimizer)
 
             gen_loss_list.append(gen_loss)
             disc_loss_list.append(dis_loss)
@@ -119,7 +135,7 @@ def main():
                 recent_save_step = synth_model.get_steps() // args.save_interval
 
         raw_data = load_batch_from(dataset, validation_set)
-        text_data = ready_data(raw_data, text_dictionary)
+        text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
         eval_gen_loss, eval_dis_loss = evaluate_vector_representation(synth_model, text_idx_data, text_data, tests)
 
         average_gen_loss = sum(gen_loss_list) / len(gen_loss_list)
@@ -174,28 +190,36 @@ def get_after_put_if_not_exist(dictionary, word):
         return dictionary[word]
 
 
-def train_vector_representation(synth_model, input_texts, raw_input_texts, tests, optimizer):
-    synth_model.set_text_encoder_trainable(False)
-    synth_model.set_generator_trainable(False)
-    synth_model.set_discriminator_trainable(True)
-    optimizer.zero_grad()
-    codes = synth_model.forward_generator(input_texts, train=True)
-    scores = synth_model.forward_discriminator(input_texts, codes, train=True)
-    target_score = executor.evaluate_code(codes, raw_input_texts, tests)
-    target_score = torch.Tensor(target_score)
-    disc_loss = torch.nn.MSELoss()(target_score.view(-1), scores.view(-1))
-    disc_loss.backward()
-    optimizer.step()
+def train_vector_representation(synth_model, input_texts, raw_input_texts, tests, tree_list, score_list, optimizer):
+    batch_size = len(input_texts)
 
+    # train generator
     synth_model.set_text_encoder_trainable(True)
     synth_model.set_generator_trainable(True)
     synth_model.set_discriminator_trainable(False)
     optimizer.zero_grad()
-    codes = synth_model.forward_generator(input_texts, train=True)
-    scores = synth_model.forward_discriminator(input_texts, codes, train=True)
+    codes = synth_model.forward_generator(input_texts, tree_list, train=True)
+    tree_list = torch.cat([tree_list[:, 1:, ], codes.unsqeeze(1)], dim=1)
+    scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
+    for i in range(batch_size):
+        score_list[i].append(scores[i])
     gen_loss = torch.sum(scores) * -1 / len(input_texts)
     gen_loss.backward()
     optimizer.step()
+
+    for i in range(batch_size):
+        # if env[i] is finished
+            synth_model.set_text_encoder_trainable(False)
+            synth_model.set_generator_trainable(False)
+            synth_model.set_discriminator_trainable(True)
+            optimizer.zero_grad()
+            scores = score_list[i] # TODO: tensor format
+            target_score = executor.evaluate_code(tree_list[i, ], raw_input_texts[i], tests[i])
+            target_score = torch.Tensor(target_score)
+            disc_loss = torch.nn.MSELoss()(target_score.view(-1), scores.view(-1))
+            disc_loss.backward()
+            optimizer.step()
+            #TODO: clear tree_list and score_list
 
     return gen_loss.item(), disc_loss.item(), target_score.mean().item()
 

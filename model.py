@@ -15,9 +15,9 @@ class CodeSynthesisModel:
     def forward_text_encoder(self, texts, train=True):
         return self.text_encoder.forward(texts)
 
-    def forward_generator(self, texts, train=True):
+    def forward_generator(self, texts, trees, train=True):
         lstm_out_list, first_notes = self.forward_text_encoder(texts, train)
-        return self.generator.forward(lstm_out_list, first_notes, train)
+        return self.generator.forward(lstm_out_list, first_notes, trees, train)
 
     def forward_discriminator(self, texts, trees, train=True):
         lstm_out_list, first_notes = self.forward_text_encoder(texts, train)
@@ -211,7 +211,7 @@ class Generator(nn.Module):
         self.embed_dim = 8
         self.note_dim = note_dim
         hidden_dim = self.embed_dim + self.note_dim * 2
-        prime_type_num = 15 # update manually
+        prime_type_num = 15  # update manually
         bin_op_num = len(ast_gen_helper.bin_op_list)
         cmp_op_num = len(ast_gen_helper.cmp_op_list)
         unary_op_num = len(ast_gen_helper.unary_op_list)
