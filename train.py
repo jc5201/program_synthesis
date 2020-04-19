@@ -89,6 +89,14 @@ def main():
     text_dictionary = loader.load_word_dictionary()
     dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
 
+    text_lists = [[] for _ in range(batch_size)]
+    pad_node = torch.LongTensor([-1, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])
+    root_node = torch.LongTensor([0, -1, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])
+    tree_list = torch.cat([pad_node.expand(batch_size, episode_max - 1, 17),
+                           root_node.expand(batch_size, 1, 17)],
+                          dim=1)
+    score_list = [[] for _ in range(batch_size)]
+
     tensorboard_writer = SummaryWriter('runs/' + model_name)
     recent_save_step = synth_model.get_steps() // args.save_interval
 
@@ -101,9 +109,6 @@ def main():
         logging.info('start epoch #{}'.format(epoch))
         batches = make_batch(training_set, batch_size)
         train_idx = 0
-        text_lists = [[] for _ in range(batch_size)]
-        tree_list = torch.LongTensor([1, -1, -1]).expand(batch_size, episode_max, -1) #TODO
-        score_list = [[] for _ in range(batch_size)]
         gen_loss_list = []
         disc_loss_list = []
         for i, batch in enumerate(batches):

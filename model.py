@@ -208,10 +208,10 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
 
         embed_dict_size = 100
-        self.embed_dim = 8
+        self.embed_dim = 32
         self.note_dim = note_dim
         hidden_dim = self.embed_dim + self.note_dim * 2
-        prime_type_num = 15  # update manually
+        prime_type_num = 24  # update manually   # offset = 2
         bin_op_num = len(ast_gen_helper.bin_op_list)
         cmp_op_num = len(ast_gen_helper.cmp_op_list)
         unary_op_num = len(ast_gen_helper.unary_op_list)
@@ -228,14 +228,21 @@ class Generator(nn.Module):
         self.leaf_list = ['break', 'continue']
 
         self.type_embedding = nn.Embedding(embed_dict_size, self.embed_dim)
-        self.sibling_mask = nn.Linear(self.embed_dim + self.note_dim, self.note_dim)
-        self.predict_type = nn.Sequential(
-            nn.Linear(hidden_dim, prime_type_num),
-            nn.Softmax()
+        self.code_lstm = nn.LSTM(self.embed_dim, self.note_dim, 2)
+        self.next_note = nn.Linear(self.note_dim * 3, self.note_dim)
+        self.ff_attention = nn.Sequential(
+            nn.Linear(self.embed_dim * 5, self.embed_dim * 3),
+            nn.ReLU(),
+            nn.Linear(self.embed_dim * 3, self.embed_dim * 1),
+            nn.ReLU()
         )
-        self.predict_note = nn.Sequential(
-            nn.Linear(hidden_dim + self.embed_dim, self.note_dim),
-            nn.Tanh()
+        self.ff_combine = nn.Sequential(
+            nn.Linear(self.embed_dim * 2, self.note_dim),
+            nn.ReLU()
+        )
+        self.predict_type = nn.Sequential(
+            nn.Linear(self.note_dim, prime_type_num),
+            nn.Softmax()
         )
         self.predict_bin_op = nn.Sequential(nn.Linear(self.note_dim, bin_op_num), nn.Softmax())
         self.predict_cmp_op = nn.Sequential(nn.Linear(self.note_dim, cmp_op_num), nn.Softmax())
@@ -252,160 +259,89 @@ class Generator(nn.Module):
         self.predict_args_num = nn.Sequential(nn.Linear(self.note_dim, arg_num_limit), nn.Softmax())
         self.ptr_ff = nn.Linear(lstm_out_dim + self.note_dim, 1)
 
-    def predict_const_copy(self, note, lstm_out):
-        l = lstm_out.size(0)
-        cc = torch.cat([note.expand(l, note.size(1)), lstm_out.view(l, -1)], dim=1)
-        return nn.Softmax(dim=1)(self.ptr_ff(cc).view(1, -1))
+    def predict_const_copy(self, notes, lstm_out, train):
+        pointers = []
+        for i in range(notes.size(0)):
+            l = lstm_out.size(1)
+            note = notes[i]
+            cc = torch.cat([note.expand(l, note.size(1)), lstm_out.view(l, -1)], dim=1)
+            pointers.append(self.pick(nn.Softmax(dim=1)(self.ptr_ff(cc).view(1, -1)), 0, train))
+        return torch.cat(pointers, dim=-1)
 
-    def next_node(self, parent, sibling, note, lstm_out, train):
-        assert parent.size()[0] == 1
-        mask = self.sibling_mask(torch.cat([parent, note], dim=1))
-        sibling_notes = list(map(lambda x: x[1], sibling))
-        sibling_sum = self.sibling_sum(mask, sibling_notes)
-        hidden = torch.cat([parent, sibling_sum, note], dim=1)
-        sort_prob = self.predict_type(hidden)
-        sort = self.pick(sort_prob, train).view(1)
-        note = self.predict_note(torch.cat([hidden, self.type_embedding(sort)], dim=1))
-        if self.token_list[sort.item()] == 'if':
-            child = self.gen_child(sort, note, ['<cond>', '<stmts>', '<stmts>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'for':
-            child = self.gen_child(sort, note, ['<expr>', '<var_name>', '<stmts>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'while':
-            child = self.gen_child(sort, note, ['<cond>', '<stmts>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'return':
-            child = self.gen_child(sort, note, ['<expr>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'call':
-            child = self.gen_child(sort, note, ['<func_name>', '<exprs>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'var':
-            child = self.gen_child(sort, note, ['<var_name>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'val':
-            child = self.gen_child(sort, note, ['<const>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'binop':
-            child = self.gen_child(sort, note, ['<op_name>', '<expr>', '<expr>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'cmpop':
-            child = self.gen_child(sort, note, ['<op_name>', '<expr>', '<expr>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'uop':
-            child = self.gen_child(sort, note, ['<op_name>', '<expr>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'assign':
-            child = self.gen_child(sort, note, ['<var_name>', '<expr>'], lstm_out, train)
-        elif self.token_list[sort.item()] == 'funcdef':
-            child = self.gen_child(sort, note, ['<func_name>', '<args_num>', '<stmts>'], lstm_out, train)
-        # TODO: []
-        else:
-            child = []
-        return sort, note, child
-
-    def gen_child(self, parent_type, parent_note, child_type_list, lstm_out, train):
-        assert len(child_type_list) != 0
-        child_list = []
-        child_note_list = []
-        mask = self.sibling_mask(torch.cat([self.type_embedding(parent_type), parent_note], dim=1))
-        for child_type in child_type_list:
-            child = torch.LongTensor([self.token_list.index(child_type)]).view(1, -1)
-            note = self.predict_note(torch.cat([self.type_embedding(parent_type),
-                                                self.sibling_sum(mask, child_note_list),
-                                                parent_note,
-                                                self.type_embedding(child.view(1))], dim=1))
-            if child_type == '<var_name>':
-                var_type = self.pick(self.predict_var_type(note), train)
-                var_long_rep = torch.LongTensor([self.token_list.index('<var_type_var>')])
-                var_type_ = var_long_rep.view(1, 1) + var_type.view(1, 1)
-                if self.token_list[var_type_.item()] == '<var_type_var>':
-                    var_name = self.pick(self.predict_var_name(note), train)
-                else:
-                    var_name = self.pick(self.predict_arg_name(note), train)
-                aux = [var_type_, var_name]
-            elif child_type == '<const>':
-                const_type = self.pick(self.predict_const_type(note), train)
-                const_long_rep = torch.LongTensor([self.token_list.index('<const_type_int>')])
-                const_type_ = const_long_rep.view(1, 1) + const_type.view(1, 1)
-                if self.token_list[const_type_.item()] == '<const_type_int>':
-                    const_val = self.pick(self.predict_const_int(note), train)
-                elif self.token_list[const_type_.item()] == '<const_type_float>':
-                    const_val = self.pick(self.predict_const_float(note), train)
-                else:
-                    const_val = self.pick(self.predict_const_copy(note, lstm_out), train)
-                aux = [const_type_, const_val]
-            elif child_type == '<op_name>':
-                if self.token_list[parent_type.item()] == 'binop':
-                    op_name = self.pick(self.predict_bin_op(note), train)
-                    aux = [op_name]
-                elif self.token_list[parent_type.item()] == 'cmpop':
-                    op_name = self.pick(self.predict_cmp_op(note), train)
-                    aux = [op_name]
-                else:
-                    op_name = self.pick(self.predict_unary_op(note), train)
-                    aux = [op_name]
-            elif child_type == '<func_name>':
-                if self.token_list[parent_type.item()] == 'call':
-                    func_type = self.pick(self.predict_func_type(note), train)
-                    func_long_rep = torch.LongTensor([self.token_list.index('<func_type_func>')])
-                    func_type_ = func_long_rep.view(1, 1) + func_type.view(1, 1)
-                    if self.token_list[func_type_.item()] == '<func_type_func>':
-                        func_name = self.pick(self.predict_func_name(note), train)
-                    else:
-                        func_name = self.pick(self.predict_builtin_func(note), train)
-                    aux = [func_type_, func_name]
-                else:
-                    func_type = torch.LongTensor([self.token_list.index('<func_type_func>')]).view(1, 1)
-                    func_name = self.pick(self.predict_func_name(note), train)
-                    aux = [func_type, func_name]
-            elif child_type == '<args_num>':
-                args_num = self.pick(self.predict_args_num(note), train)
-                aux = [args_num]
-            else:
-                aux = []
-            child_list.append((child, note, aux))
-            child_note_list.append(note)
-        return child_list
-
-    def sibling_sum(self, mask, note_list):
-        sibling_num = len(note_list)
-        if sibling_num == 0:
-            return torch.zeros(1, self.note_dim)
-        masked = mask.expand(sibling_num, self.note_dim) * torch.cat(note_list, dim=0)
-        return torch.sum(masked, dim=0).view(1, -1)
-
-    def pick(self, prob, train):
+    def pick(self, prob, offset, train):
         if train:
             dist = torch.distributions.Categorical(prob)
             result = dist.sample()
         else:
             _, result = torch.max(prob.view(-1), 0)
-        return result
+        return result + torch.LongTensor([offset]).view(result.size())
 
-    def forward(self, lstm_out_list, first_notes, train=True):
-        trees_list = []
-        for i in range(first_notes.size(0)):
-            first_note = first_notes[i, :].view(1, -1)
-            traverse_list = []
-            root_type = torch.LongTensor([self.token_list.index('<root>')]).view(1)
-            root = [root_type, first_note, []]
-            traverse_list.append(root)
-            trees_list.append(root)
-            j = 0
-            while len(traverse_list) != 0:
-                j = j + 1
-                if j > 100:
-                    break
-                current = traverse_list[0]
-                traverse_list = traverse_list[1:]
-                child = current[2]
-                for k in range(10):
-                    current_embed = self.type_embedding(current[0]).view(1, -1)
-                    next, note, next_child_list = self.next_node(current_embed, child, current[1], lstm_out_list[i], train)
-                    if next.item() == self.token_list.index('<End>'):
-                        break
-                    elif len(next_child_list) == 0:
-                        child.append([next, note, []])
-                    else:
-                        n = [next, note, []]
-                        for c in next_child_list:
-                            cn = [c[0], c[1], c[2]]
-                            n[2].append(cn)
-                            if len(c[2]) == 0:  # else, there is aux
-                                traverse_list.append(cn)
-                        child.append(n)
+    def tree_attention(self, trees, first_notes, train):
+        embeded_code = self.type_embedding(trees[:, :, 2])
+        # (batch_size, episode_len, note_dim)
+        code_lstm_out, _ = self.code_lstm(embeded_code)
+        # (batch_size, episode_len, note_dim)
+        notes = [first_notes.unsqueeze(1)]
+        for i in range(trees.size(1)):
+            next_note = self.next_note(torch.cat([first_notes, notes[0].squeeze(1), code_lstm_out[:, i, :]])).unsqueeze(1)
+            notes.append(next_note)
 
-        return trees_list
+        final_note = notes[trees.size(1)]
+        stacked_notes = torch.stack(notes[:-1], dim=1)
+        # (batch_size, episode_len, note_dim)
+        score = torch.bmm(stacked_notes.reshape(trees.size(0) * trees.size(1), 1, self.note_dim),
+                          final_note.reshape(trees.size(0) * trees.size(1), self.note_dim, 1))\
+                    .reshape(trees.size(0), trees.size(1))
+
+        return torch.Softmax(1)(score)
+
+    def forward(self, lstm_out_list, first_notes, trees, train=True):
+        # idx, parent_idx, type, value1, ...
+        idx = trees[:, -1, 0] + torch.LongTensor([1]).expand(trees.size(0), 1)
+        parent_idx_list = []
+        for i in range(trees.size(0)):
+            if trees[i, -1, 2] == self.token_list.index('<End>'):
+                prev_parent_idx = trees[i, -1, 1]
+                parent_idx_list.append(trees[i, (idx[i, 0] - prev_parent_idx - 1), 1])
+        parent_idx = torch.LongTensor(parent_idx_list)
+
+        parent_type_list = [trees[i, parent_idx[i], 2] for i in range(trees.size(0))]
+        parent_type = torch.LongTensor(parent_type_list)
+        parent_type_embed = self.type_embedding(parent_type)
+
+        attentions = self.tree_attention(trees, first_notes, train)
+        sorted_attention_value, sorted_attention_idx = attentions.sort(1, True)
+
+        l2 = []
+        for i in range(trees.size(0)):
+            l1 = []
+            for j in range(5):
+                l1.append(parent_type_embed[i, sorted_attention_idx[i, j]])
+            torch.stack(l1, dim=-1)
+        reordered_trees = torch.stack(l2, dim=-1)
+        # (batch_size, 5, embed_dim)
+        temp_output = self.ff_attention(reordered_trees.view(trees.size(0), -1))
+        temp_output = self.ff_combine(torch.cat([parent_type_embed, temp_output], dim=1))
+
+        type = self.pick(self.predict_type(temp_output), 2, train)
+        value1 = self.pick(self.predict_bin_op(temp_output), 0, train)
+        value2 = self.pick(self.predict_cmp_op(temp_output), 0, train)
+        value3 = self.pick(self.predict_unary_op(temp_output), 0, train)
+        value4 = self.pick(self.predict_func_type(temp_output), 31, train)
+        value5 = self.pick(self.predict_builtin_func(temp_output), 0, train)
+        value6 = self.pick(self.predict_func_name(temp_output), 0, train)
+        value7 = self.pick(self.predict_var_type(temp_output), 26, train)
+        value8 = self.pick(self.predict_arg_name(temp_output), 0, train)
+        value9 = self.pick(self.predict_var_name(temp_output), 0, train)
+        value10 = self.pick(self.predict_const_type(temp_output), 28, train)
+        value11 = self.pick(self.predict_const_int(temp_output), 0, train)
+        value12 = self.pick(self.predict_const_float(temp_output), 0, train)
+        value13 = self.pick(self.predict_args_num(temp_output), 0, train)
+        value14 = self.predict_const_copy(temp_output, lstm_out_list)
+
+        return torch.cat([idx, parent_idx, type,
+                          value1, value2, value3, value4, value5,
+                          value6, value7, value8, value9, value10,
+                          value11, value12, value13, value14], dim=1)
+
 
