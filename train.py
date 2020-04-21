@@ -204,7 +204,7 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     synth_model.set_discriminator_trainable(False)
     optimizer.zero_grad()
     codes = synth_model.forward_generator(input_texts, tree_list, train=True)
-    tree_list = torch.cat([tree_list[:, 1:, ], codes.unsqeeze(1)], dim=1)
+    tree_list = torch.cat([tree_list[:, 1:, ], codes.unsqueeze(1)], dim=1)
     scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
     for i in range(batch_size):
         score_list[i].append(scores[i])

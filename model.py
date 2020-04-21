@@ -94,27 +94,45 @@ class Discriminator(nn.Module):
         lstm_out_dim = lstm_out_dim
 
         add_prefix = lambda x, y:list(map(lambda e: y + e if isinstance(e, str) else y + str(e), x))
-        self.token_list = ast_gen_helper.token_list + add_prefix(ast_gen_helper.bin_op_list, 'bin_op_') \
-                          + add_prefix(ast_gen_helper.cmp_op_list, 'cmp_op_') \
-                          + add_prefix(ast_gen_helper.unary_op_list, 'unary_op_') \
-                          + add_prefix(ast_gen_helper.builtin_func_list, 'builtin_func_') \
+        self.token_list = ast_gen_helper.token_list \
+                          + ast_gen_helper.bin_op_list \
+                          + ast_gen_helper.cmp_op_list \
+                          + ast_gen_helper.unary_op_list \
+                          + ast_gen_helper.builtin_func_list \
+                          + ast_gen_helper.const_int_list \
+                          + ast_gen_helper.const_float_list \
                           + add_prefix(range(ast_gen_helper.var_num_limit), 'name_var') \
                           + add_prefix(range(ast_gen_helper.arg_num_limit), 'name_arg') \
                           + add_prefix(range(ast_gen_helper.func_num_limit), 'name_func') \
-                          + add_prefix(ast_gen_helper.const_int_list, 'const_int_') \
-                          + add_prefix(ast_gen_helper.const_float_list, 'const_float_') \
                           + add_prefix(range(ast_gen_helper.arg_num_limit), 'arg_num_')
 
         self.embedding = nn.Embedding(embed_dict_size, self.embed_dim)
-        self.leaf_ff = nn.Sequential(
-            nn.Linear(self.embed_dim * 2, self.hidden_dim),
-            nn.Linear(self.hidden_dim, self.hidden_dim)
-        )
-        self.node_ff = nn.Sequential(
-            nn.Linear(self.embed_dim * 2 + self.hidden_dim, self.hidden_dim),
+        self.leaf_end_ff = nn.Linear(self.embed_dim, self.hidden_dim)
+        self.leaf_child_ff = nn.Sequential(
+            nn.Linear(self.embed_dim * 14 + lstm_out_dim, self.hidden_dim * 4),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
             nn.ReLU()
         )
-        self.ptr_ff = nn.Linear(note_dim + lstm_out_dim, self.hidden_dim)
+        self.child_sum_ff = nn.Sequential(
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim * 4),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
+            nn.ReLU()
+        )
+
+        self.node_ff = nn.Sequential(
+            nn.Linear(self.embed_dim * 14 + lstm_out_dim, self.hidden_dim * 4),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
+            nn.ReLU()
+        )
+        self.combine_ff = nn.Sequential(
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim * 4),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
+            nn.ReLU()
+        )
 
         self.ff_model = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim),
@@ -124,81 +142,54 @@ class Discriminator(nn.Module):
             nn.Linear(self.hidden_dim, 1)
         )
 
-    def child_sum(self, parent_type, node, lstm_out, first_note):
-        node_type = node[0]
-        node_children = node[2]
+    def child_sum(self, tree, lstm_out, first_note):
+        node_type = tree[0, 2]
+        node_children_idx = list(filter(lambda x: tree[x, 1] == tree[0, 0], range(tree.size(0))))
+        children_summary = []
+        for start_idx in node_children_idx:
+            end_idx = -1
+            for j in range(start_idx, tree.size(0)):
+                if tree[j, 1] == tree[0, 0]:
+                    end_idx = j
+                    break
+            if end_idx == -1:
+                break
+            child_tree = tree[start_idx:end_idx, :]
+            summary = self.child_sum(child_tree, lstm_out, first_note)
+            children_summary.append(summary)
 
-        def long_ind(x):
-            return torch.LongTensor([self.token_list.index(x)])
+        if len(children_summary) == 0:
+            if node_type.item() == self.token_list.index('<End>'):
+                return self.leaf_end_ff(self.embedding(node_type)).view(1, -1)
+            else:
+                embedded = self.embedding(tree[0, 2:-1])
+                ptr_embedded = lstm_out[tree[0, -1], 0, :]
+                # (15, embed_dim)
+                return self.leaf_child_ff(torch.cat([embedded.view(-1), ptr_embedded], dim=0).view(1, -1))
 
-        if node_type.item() == self.token_list.index('<var_name>'):
-            var_type, var_name = node_children[0], node_children[1]
-            var_idx = long_ind('name_var0') \
-                      + (var_type - long_ind('<var_type_var>')) \
-                      * (long_ind('name_arg0') - long_ind('name_var0')) \
-                      + var_name
-            v = self.embedding(torch.cat((node_type.view(1), var_idx.view(1)))).view(1, -1)
-            return self.leaf_ff(v)
-        elif node_type.item() == self.token_list.index('<const>'):
-            const_type, const_val = node_children[0], node_children[1]
-            if self.token_list[const_type.item()] == '<const_type_int>':
-                idx = long_ind('const_int_-1') + const_val
-                v = self.embedding(torch.cat((const_type.view(1), idx.view(1)))).view(1, -1)
-                return self.leaf_ff(v)
-            elif self.token_list[const_type.item()] == '<const_type_float>':
-                idx = long_ind('const_float_-1.0') + const_val
-                v = self.embedding(torch.cat((const_type.view(1), idx.view(1)))).view(1, -1)
-                return self.leaf_ff(v)
-            else:
-                v = torch.cat((first_note, lstm_out[const_val.item(), 0, :])).view(1, -1)
-                return self.ptr_ff(v)
-        elif node_type.item() == self.token_list.index('<op_name>'):
-            op_name = node_children[0]
-            if self.token_list[parent_type.item()] == 'binop':
-                idx = long_ind('bin_op_+') + op_name
-                v = self.embedding(torch.cat((node_type.view(1), idx.view(1)))).view(1, -1)
-                return self.leaf_ff(v)
-            elif self.token_list[parent_type.item()] == 'cmpop':
-                idx = long_ind('cmp_op_==') + op_name
-                v = self.embedding(torch.cat((node_type.view(1), idx.view(1)))).view(1, -1)
-                return self.leaf_ff(v)
-            else:
-                idx = long_ind('unary_op_~') + op_name
-                v = self.embedding(torch.cat((node_type.view(1), idx.view(1)))).view(1, -1)
-                return self.leaf_ff(v)
-        elif node_type.item() == self.token_list.index('<func_name>'):
-            func_type, func_name = node_children[0], node_children[1]
-            if self.token_list[func_type.item()] == '<func_type_func>':
-                idx = long_ind('name_func0') + func_name
-                v = self.embedding(torch.cat((func_type.view(1), idx.view(1)))).view(1, -1)
-                return self.leaf_ff(v)
-            else:
-                idx = long_ind('builtin_func_list') + func_name
-                v = self.embedding(torch.cat((func_type.view(1), idx.view(1)))).view(1, -1)
-                return self.leaf_ff(v)
-        elif node_type.item() == self.token_list.index('<args_num>'):
-            args_num = node_children[0]
-            idx = long_ind('arg_num_0') + args_num
-            v = self.embedding(torch.cat((node_type.view(1), idx.view(1)))).view(1, -1)
-            return self.leaf_ff(v)
-        else:
-            if len(node_children) == 0:
-                children = torch.zeros(1, self.hidden_dim)
-            else:
-                children = torch.stack([self.child_sum(node_type, c, lstm_out, first_note).view(-1) for c in node_children])
-            parent_embed = self.embedding(parent_type).view(1, -1)
-            node_embed = self.embedding(node_type).view(1, -1)
-            children_sum = torch.sum(children, dim=0).view(1, -1)
-            return self.node_ff(torch.cat((parent_embed, node_embed, children_sum), dim=1))
+        child_summary = children_summary[0]
+        for i in range(1, len(children_summary)):
+            child_summary = self.child_sum_ff(torch.cat([child_summary, children_summary[i]], dim=1))
+
+        node_embedded = self.embedding(tree[0, 2:-1])
+        node_ptr_embedded = lstm_out[tree[0, -1], 0, :]
+        node_tmp = self.node_ff(torch.cat([node_embedded.view(-1), node_ptr_embedded], dim=0).view(1, -1))
+
+        return self.combine_ff(torch.cat([node_tmp, child_summary], dim=1))
 
     def forward(self, lstm_out_list, first_notes, trees, train):
         tree_sum = []
         for i, (note, tree) in enumerate(zip(first_notes, trees)):
-            assert self.token_list[tree[0].item()] == '<root>'
-            summary = self.child_sum(tree[0], tree, lstm_out_list[i], first_notes[i, :])
+            start_idx = -1
+            for j in range(trees.size(1)):
+                if tree[j, 2] == self.token_list.index('<root>'):
+                    start_idx = j
+                    break
+            assert start_idx != -1
+            summary = self.child_sum(tree[start_idx:, :], lstm_out_list[i], note)
             tree_sum.append(summary)
 
-        ff_out = self.ff_model(torch.stack(tree_sum))
+        ff_out = self.ff_model(torch.cat(tree_sum, dim=0))
         score = self.tail_score(ff_out)
         return score
 
@@ -262,11 +253,11 @@ class Generator(nn.Module):
     def predict_const_copy(self, notes, lstm_out, train):
         pointers = []
         for i in range(notes.size(0)):
-            l = lstm_out.size(1)
+            l = lstm_out[i].size(0)
             note = notes[i]
-            cc = torch.cat([note.expand(l, note.size(1)), lstm_out.view(l, -1)], dim=1)
+            cc = torch.cat([note.expand(l, notes.size(1)), lstm_out[i].view(l, -1)], dim=1)
             pointers.append(self.pick(nn.Softmax(dim=1)(self.ptr_ff(cc).view(1, -1)), 0, train))
-        return torch.cat(pointers, dim=-1)
+        return torch.cat(pointers, dim=0)
 
     def pick(self, prob, offset, train):
         if train:
@@ -274,36 +265,39 @@ class Generator(nn.Module):
             result = dist.sample()
         else:
             _, result = torch.max(prob.view(-1), 0)
-        return result + torch.LongTensor([offset]).view(result.size())
+        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).reshape(prob.size(0), 1)
 
     def tree_attention(self, trees, first_notes, train):
         embeded_code = self.type_embedding(trees[:, :, 2])
-        # (batch_size, episode_len, note_dim)
+        # (batch_size, episode_len, embed_dim)
         code_lstm_out, _ = self.code_lstm(embeded_code)
         # (batch_size, episode_len, note_dim)
         notes = [first_notes.unsqueeze(1)]
         for i in range(trees.size(1)):
-            next_note = self.next_note(torch.cat([first_notes, notes[0].squeeze(1), code_lstm_out[:, i, :]])).unsqueeze(1)
+            next_note = self.next_note(torch.cat([first_notes, notes[0].squeeze(1), code_lstm_out[:, i, :]], dim=1)).unsqueeze(1)
             notes.append(next_note)
 
         final_note = notes[trees.size(1)]
-        stacked_notes = torch.stack(notes[:-1], dim=1)
+        stacked_notes = torch.cat(notes[:-1], dim=1)
         # (batch_size, episode_len, note_dim)
         score = torch.bmm(stacked_notes.reshape(trees.size(0) * trees.size(1), 1, self.note_dim),
-                          final_note.reshape(trees.size(0) * trees.size(1), self.note_dim, 1))\
+                          final_note.squeeze().expand(trees.size(0) * trees.size(1), self.note_dim)
+                          .reshape(trees.size(0) * trees.size(1), self.note_dim, 1))\
                     .reshape(trees.size(0), trees.size(1))
 
-        return torch.Softmax(1)(score)
+        return nn.Softmax(1)(score)
 
     def forward(self, lstm_out_list, first_notes, trees, train=True):
         # idx, parent_idx, type, value1, ...
-        idx = trees[:, -1, 0] + torch.LongTensor([1]).expand(trees.size(0), 1)
+        idx = trees[:, -1, 0].view(trees.size(0), 1) + torch.LongTensor([1]).expand(trees.size(0), 1)
         parent_idx_list = []
         for i in range(trees.size(0)):
             if trees[i, -1, 2] == self.token_list.index('<End>'):
                 prev_parent_idx = trees[i, -1, 1]
                 parent_idx_list.append(trees[i, (idx[i, 0] - prev_parent_idx - 1), 1])
-        parent_idx = torch.LongTensor(parent_idx_list)
+            else:
+                parent_idx_list.append(trees[i, -1, 1])
+        parent_idx = torch.LongTensor(parent_idx_list).view(-1, 1)
 
         parent_type_list = [trees[i, parent_idx[i], 2] for i in range(trees.size(0))]
         parent_type = torch.LongTensor(parent_type_list)
@@ -316,9 +310,9 @@ class Generator(nn.Module):
         for i in range(trees.size(0)):
             l1 = []
             for j in range(5):
-                l1.append(parent_type_embed[i, sorted_attention_idx[i, j]])
-            torch.stack(l1, dim=-1)
-        reordered_trees = torch.stack(l2, dim=-1)
+                l1.append(trees[i, sorted_attention_idx[i, j], 2])
+            l2.append(self.type_embedding(torch.LongTensor(l1)).view(5, self.embed_dim))
+        reordered_trees = torch.stack(l2)
         # (batch_size, 5, embed_dim)
         temp_output = self.ff_attention(reordered_trees.view(trees.size(0), -1))
         temp_output = self.ff_combine(torch.cat([parent_type_embed, temp_output], dim=1))
@@ -337,7 +331,7 @@ class Generator(nn.Module):
         value11 = self.pick(self.predict_const_int(temp_output), 0, train)
         value12 = self.pick(self.predict_const_float(temp_output), 0, train)
         value13 = self.pick(self.predict_args_num(temp_output), 0, train)
-        value14 = self.predict_const_copy(temp_output, lstm_out_list)
+        value14 = self.predict_const_copy(temp_output, lstm_out_list, train)
 
         return torch.cat([idx, parent_idx, type,
                           value1, value2, value3, value4, value5,
