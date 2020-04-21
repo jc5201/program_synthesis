@@ -3,7 +3,6 @@ token_list = ['<pad>', '<root>',
               '<End>', 'funcdef', 'assign', 'return', 'if', 'for', 'while', 'call', 'var', 'val',
               'binop', 'cmpop', 'uop', 'break', 'continue',
               '<cond>', '<stmts>', '<expr>', '<exprs>',
-              '<var_name>', '<func_name>', '<op_name>', '<args_num>', '<const>',
 
               '<var_type_var>', '<var_type_arg>',
               '<const_type_int>', '<const_type_float>', '<const_type_pointer>',
@@ -27,3 +26,16 @@ func_num_limit = 20
 arg_num_limit = 10
 var_num_limit = 20
 
+
+add_prefix = lambda x, y:list(map(lambda e: y + e if isinstance(e, str) else y + str(e), x))
+all_token_list = token_list \
+                 + bin_op_list \
+                 + cmp_op_list \
+                 + unary_op_list \
+                 + builtin_func_list \
+                 + const_int_list \
+                 + const_float_list \
+                 + add_prefix(range(var_num_limit), 'name_var') \
+                 + add_prefix(range(arg_num_limit), 'name_arg') \
+                 + add_prefix(range(func_num_limit), 'name_func') \
+                 + add_prefix(range(arg_num_limit), 'arg_num_')

@@ -93,18 +93,7 @@ class Discriminator(nn.Module):
         self.hidden_dim = 32
         lstm_out_dim = lstm_out_dim
 
-        add_prefix = lambda x, y:list(map(lambda e: y + e if isinstance(e, str) else y + str(e), x))
-        self.token_list = ast_gen_helper.token_list \
-                          + ast_gen_helper.bin_op_list \
-                          + ast_gen_helper.cmp_op_list \
-                          + ast_gen_helper.unary_op_list \
-                          + ast_gen_helper.builtin_func_list \
-                          + ast_gen_helper.const_int_list \
-                          + ast_gen_helper.const_float_list \
-                          + add_prefix(range(ast_gen_helper.var_num_limit), 'name_var') \
-                          + add_prefix(range(ast_gen_helper.arg_num_limit), 'name_arg') \
-                          + add_prefix(range(ast_gen_helper.func_num_limit), 'name_func') \
-                          + add_prefix(range(ast_gen_helper.arg_num_limit), 'arg_num_')
+        self.token_list = ast_gen_helper.all_token_list
 
         self.embedding = nn.Embedding(embed_dict_size, self.embed_dim)
         self.leaf_end_ff = nn.Linear(self.embed_dim, self.hidden_dim)
@@ -265,7 +254,7 @@ class Generator(nn.Module):
             result = dist.sample()
         else:
             _, result = torch.max(prob.view(-1), 0)
-        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).reshape(prob.size(0), 1)
+        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).expand(prob.size(0), 1)
 
     def tree_attention(self, trees, first_notes, train):
         embeded_code = self.type_embedding(trees[:, :, 2])
@@ -281,9 +270,9 @@ class Generator(nn.Module):
         stacked_notes = torch.cat(notes[:-1], dim=1)
         # (batch_size, episode_len, note_dim)
         score = torch.bmm(stacked_notes.reshape(trees.size(0) * trees.size(1), 1, self.note_dim),
-                          final_note.squeeze().expand(trees.size(0) * trees.size(1), self.note_dim)
+                          final_note.reshape(trees.size(0), 1, self.note_dim).repeat(1, trees.size(1), 1)
                           .reshape(trees.size(0) * trees.size(1), self.note_dim, 1))\
-                    .reshape(trees.size(0), trees.size(1))
+            .reshape(trees.size(0), trees.size(1))
 
         return nn.Softmax(1)(score)
 
@@ -321,13 +310,13 @@ class Generator(nn.Module):
         value1 = self.pick(self.predict_bin_op(temp_output), 0, train)
         value2 = self.pick(self.predict_cmp_op(temp_output), 0, train)
         value3 = self.pick(self.predict_unary_op(temp_output), 0, train)
-        value4 = self.pick(self.predict_func_type(temp_output), 31, train)
+        value4 = self.pick(self.predict_func_type(temp_output), 26, train)
         value5 = self.pick(self.predict_builtin_func(temp_output), 0, train)
         value6 = self.pick(self.predict_func_name(temp_output), 0, train)
-        value7 = self.pick(self.predict_var_type(temp_output), 26, train)
+        value7 = self.pick(self.predict_var_type(temp_output), 21, train)
         value8 = self.pick(self.predict_arg_name(temp_output), 0, train)
         value9 = self.pick(self.predict_var_name(temp_output), 0, train)
-        value10 = self.pick(self.predict_const_type(temp_output), 28, train)
+        value10 = self.pick(self.predict_const_type(temp_output), 23, train)
         value11 = self.pick(self.predict_const_int(temp_output), 0, train)
         value12 = self.pick(self.predict_const_float(temp_output), 0, train)
         value13 = self.pick(self.predict_args_num(temp_output), 0, train)

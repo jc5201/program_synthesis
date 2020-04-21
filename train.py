@@ -3,6 +3,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import logging
 import argparse
+import sys
 import os
 import shutil
 import time
@@ -80,7 +81,7 @@ def main():
         synth_model, optimizer = load_model(model_name)
     else:
         synth_model, optimizer = create_model(model_name)
-    validation_set = range(trainA_len // 100)
+    validation_set = [i * 100 for i in range(trainA_len // 100)]
     training_set = list(set(range(trainA_len)) - set(validation_set))
     target_epoch = args.epoch
     batch_size = args.batch_size
@@ -89,9 +90,10 @@ def main():
     text_dictionary = loader.load_word_dictionary()
     dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
 
+    current_set = [0 for _ in range(batch_size)]
     text_lists = [[] for _ in range(batch_size)]
     pad_node = torch.LongTensor([-1, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])
-    root_node = torch.LongTensor([0, -1, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])
+    root_node = torch.LongTensor([0, -1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     tree_list = torch.cat([pad_node.expand(batch_size, episode_max - 1, 17),
                            root_node.expand(batch_size, 1, 17)],
                           dim=1)
@@ -100,53 +102,83 @@ def main():
     tensorboard_writer = SummaryWriter('runs/' + model_name)
     recent_save_step = synth_model.get_steps() // args.save_interval
 
+    logging.info('argv : {}'.format(sys.argv))
+
     logging.info('start training. step: {}, batch size:{}, learning rate:{}, {}, {}'.format(
         synth_model.get_steps(), batch_size, args.text_learning_rate,
         args.generator_learning_rate, args.discriminator_learning_rate
     ))
 
-    for epoch in range(target_epoch):
-        logging.info('start epoch #{}'.format(epoch))
-        batches = make_batch(training_set, batch_size)
-        train_idx = 0
-        gen_loss_list = []
-        disc_loss_list = []
-        for i, batch in enumerate(batches):
-            #logging.debug('start batch #{}: {}'.format(i, batch))
-            optimizer.zero_grad()
-            for text_list in text_lists:
-                if text_list == []:
-                    raw_data = load_batch_from(dataset, [train_idx])
-                    train_idx += 1
-                    text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
-                    text_list.append(text_idx_data[0])
-                    text_list.append(text_data[0])
-                    text_list.append(tests[0])
+    epoch = 0
+    logging.info('start epoch #{}'.format(epoch))
+    train_idx = 0
+    gen_loss_list = []
+    disc_loss_list = []
+    i = 0
+    while True:
+        #logging.debug('start batch #{}: {}'.format(i, batch))
+        optimizer.zero_grad()
+        for j, text_list in enumerate(text_lists):
+            if text_list == []:
+                raw_data = load_batch_from(dataset, [train_idx])
+                current_set[j] = training_set[train_idx]
+                train_idx += 1
+                text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
+                text_list.append(text_idx_data[0])
+                text_list.append(text_data[0])
+                text_list.append(tests[0])
+            if train_idx == len(training_set):
+                # epoch finished
+                raw_data = load_batch_from(dataset, validation_set)
+                text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
+                eval_gen_loss, eval_dis_loss = evaluate_vector_representation(synth_model, text_idx_data, text_data, tests)
 
-            text_idx_data, text_data, tests = [e[0] for e in text_lists], [e[1] for e in text_lists], [e[2] for e in text_lists]
-            gen_loss, dis_loss, target_score = \
-                train_vector_representation(synth_model, text_idx_data, text_data, tests, tree_list, score_list, optimizer)
+                logging.info('epoch #{}: validation_loss: {}, {}'.format(
+                    epoch, eval_gen_loss, eval_dis_loss))
+                tensorboard_writer.add_scalar('Eval/gen', eval_gen_loss, epoch)
+                tensorboard_writer.add_scalar('Eval/dis', eval_dis_loss, epoch)
+                epoch += 1
+                train_idx = 0
+                if epoch == target_epoch:
+                    break
+        if epoch == target_epoch:
+            break
 
-            gen_loss_list.append(gen_loss)
-            disc_loss_list.append(dis_loss)
-            synth_model.increase_step(batch_size)
-            tensorboard_writer.add_scalar('Loss/train_gen', gen_loss, synth_model.get_steps())
-            tensorboard_writer.add_scalar('Loss/train_dis', dis_loss, synth_model.get_steps())
-            tensorboard_writer.add_scalar('Loss/train_target', target_score, synth_model.get_steps())
-            logging.debug('finished batch: gen_loss: {}, dis_loss: {}, target_score: {}'.format(
-                gen_loss, dis_loss, target_score))
-            if synth_model.get_steps() // args.save_interval > recent_save_step:
-                save_model(model_name, synth_model, optimizer, synth_model.get_steps())
-                recent_save_step = synth_model.get_steps() // args.save_interval
+        text_idx_data, text_data, tests = [e[0] for e in text_lists], [e[1] for e in text_lists], [e[2] for e in text_lists]
+        gen_loss, dis_loss_list, target_score_list, tree_list = \
+            train_vector_representation(synth_model, text_idx_data, text_data, tests, tree_list, score_list, optimizer)
 
-        raw_data = load_batch_from(dataset, validation_set)
-        text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
-        eval_gen_loss, eval_dis_loss = evaluate_vector_representation(synth_model, text_idx_data, text_data, tests)
+        for j in range(batch_size):
+            if len(score_list[j]) == 0:
+                tree_list[j] = torch.cat([pad_node.expand(1, episode_max - 1, 17),
+                                          root_node.expand(1, 1, 17)],
+                                         dim=1)
 
-        average_gen_loss = sum(gen_loss_list) / len(gen_loss_list)
-        average_dis_loss = sum(disc_loss_list) / len(disc_loss_list)
-        logging.info('epoch #{}: training_loss: {}, {}, validation_loss: {}, {}'.format(
-            epoch, average_gen_loss, average_dis_loss, eval_gen_loss, eval_dis_loss))
+        gen_loss_list.append(gen_loss)
+        disc_loss_list = disc_loss_list + dis_loss_list
+        synth_model.increase_step(batch_size)
+        tensorboard_writer.add_scalar('Loss/train_gen', gen_loss, synth_model.get_steps())
+        if len(dis_loss_list) != 0:
+            tensorboard_writer.add_scalar('Loss/train_dis', sum(dis_loss_list) / len(dis_loss_list), synth_model.get_steps())
+        if len(target_score_list) != 0:
+            tensorboard_writer.add_scalar('Loss/train_target', sum(target_score_list) / len(target_score_list), synth_model.get_steps())
+        logging.debug('finished step #{} with batch{}: gen_loss: {}, dis_loss: {}, target_score: {}'.format(
+            i, current_set, gen_loss, dis_loss_list, target_score_list))
+        if synth_model.get_steps() // args.save_interval > recent_save_step:
+            save_model(model_name, synth_model, optimizer, synth_model.get_steps())
+            recent_save_step = synth_model.get_steps() // args.save_interval
+
+            average_gen_loss = sum(gen_loss_list) / len(gen_loss_list)
+            if len(disc_loss_list) == 0:
+                average_dis_loss = "Nothing"
+            else:
+                average_dis_loss = sum(disc_loss_list) / len(disc_loss_list)
+            gen_loss_list, disc_loss_list = [], []
+
+            logging.info('step #{}: average_training_loss: {}, {}'.format(
+                synth_model.get_steps(), average_gen_loss, average_dis_loss))
+        i += 1
+
     save_model(model_name, synth_model, optimizer)
     tensorboard_writer.close()
 
@@ -207,29 +239,43 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     tree_list = torch.cat([tree_list[:, 1:, ], codes.unsqueeze(1)], dim=1)
     scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
     for i in range(batch_size):
-        score_list[i].append(scores[i])
+        score_list[i].append(scores[i].clone())
     gen_loss = torch.sum(scores) * -1 / len(input_texts)
-    gen_loss.backward()
+    gen_loss.backward(retain_graph=True)
     optimizer.step()
 
+    disc_loss_list = []
+    target_score_list = []
     for i in range(batch_size):
-        # if env[i] is finished
+        # (episode length is max) or (last node's parent is root) and (last node is <End>)
+        if tree_list[i, 0, 2].item() == 1 or (tree_list[i, -1, 1].item() == 0 and tree_list[i, -1, 2].item() == 2):
+            for j in range(tree_list.size(1)):
+                if tree_list[i, j, 2].item() == 1:
+                    start_idx = j
+                    break
             synth_model.set_text_encoder_trainable(False)
             synth_model.set_generator_trainable(False)
             synth_model.set_discriminator_trainable(True)
             optimizer.zero_grad()
-            scores = score_list[i] # TODO: tensor format
-            target_score = executor.evaluate_code(tree_list[i, ], raw_input_texts[i], tests[i])
+            scores = torch.stack(score_list[i])
+            min_score = torch.min(scores)
+            target_score = executor.evaluate_code([tree_list[i, start_idx:, :].detach()], [raw_input_texts[i]], [tests[i]])
             target_score = torch.Tensor(target_score)
-            disc_loss = torch.nn.MSELoss()(target_score.view(-1), scores.view(-1))
-            disc_loss.backward()
+            disc_loss = torch.nn.MSELoss()(target_score.view(-1), min_score.view(-1))
+            disc_loss.backward(retain_graph=True)
             optimizer.step()
-            #TODO: clear tree_list and score_list
+            disc_loss_list.append(disc_loss.item())
+            target_score_list.append(target_score.mean().item())
+            score_list[i] = []
+            logging.debug("episode for {} finished:start {}, disc_loss {}, target_score {}"
+                          .format(i, start_idx, disc_loss.item(), target_score.mean().item()))
 
-    return gen_loss.item(), disc_loss.item(), target_score.mean().item()
+    return gen_loss.item(), disc_loss_list, target_score_list, tree_list
 
 
 def evaluate_vector_representation(synth_model, input_texts, raw_input_texts, tests):
+    # TODO
+    return 0, 0
     codes = synth_model.forward_generator(input_texts, train=False)
     scores = synth_model.forward_discriminator(input_texts, codes, train=False)
     target_score = executor.evaluate_code(codes, raw_input_texts, tests)
