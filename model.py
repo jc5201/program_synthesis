@@ -6,9 +6,9 @@ import ast_gen_helper
 class CodeSynthesisModel:
     def __init__(self, note_dim=16):
         lstm_out_dim = 32
-        self.text_encoder = TextEncoder(note_dim, lstm_out_dim)
-        self.generator = Generator(note_dim, lstm_out_dim)
-        self.discriminator = Discriminator(note_dim, lstm_out_dim)
+        self.text_encoder = TextEncoder(note_dim, lstm_out_dim).cuda()
+        self.generator = Generator(note_dim, lstm_out_dim).cuda()
+        self.discriminator = Discriminator(note_dim, lstm_out_dim).cuda()
 
         self.step = 0
 
@@ -53,7 +53,7 @@ class TextEncoder(nn.Module):
     def __init__(self, latent_vector_dim, lstm_out_dim):
         super(TextEncoder, self).__init__()
 
-        self.vector_token = torch.LongTensor([1999])
+        self.vector_token = torch.LongTensor([1999]).cuda()
         embed_dict_size = 2000
         self.embed_dim = 32
         self.lstm_out_dim = lstm_out_dim
@@ -137,7 +137,7 @@ class Discriminator(nn.Module):
         children_summary = []
         for start_idx in node_children_idx:
             end_idx = -1
-            for j in range(start_idx, tree.size(0)):
+            for j in range(start_idx + 1, tree.size(0)):
                 if tree[j, 1] == tree[0, 0]:
                     end_idx = j
                     break
@@ -254,7 +254,7 @@ class Generator(nn.Module):
             result = dist.sample()
         else:
             _, result = torch.max(prob.view(-1), 0)
-        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).expand(prob.size(0), 1)
+        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).expand(prob.size(0), 1).cuda()
 
     def tree_attention(self, trees, first_notes, train):
         embeded_code = self.type_embedding(trees[:, :, 2])
@@ -278,18 +278,18 @@ class Generator(nn.Module):
 
     def forward(self, lstm_out_list, first_notes, trees, train=True):
         # idx, parent_idx, type, value1, ...
-        idx = trees[:, -1, 0].view(trees.size(0), 1) + torch.LongTensor([1]).expand(trees.size(0), 1)
+        idx = trees[:, -1, 0].view(trees.size(0), 1) + torch.LongTensor([1]).expand(trees.size(0), 1).cuda()
         parent_idx_list = []
         for i in range(trees.size(0)):
             if trees[i, -1, 2] == self.token_list.index('<End>'):
                 prev_parent_idx = trees[i, -1, 1]
                 parent_idx_list.append(trees[i, (idx[i, 0] - prev_parent_idx - 1), 1])
             else:
-                parent_idx_list.append(trees[i, -1, 1])
-        parent_idx = torch.LongTensor(parent_idx_list).view(-1, 1)
+                parent_idx_list.append(trees[i, -1, 0])
+        parent_idx = torch.LongTensor(parent_idx_list).view(-1, 1).cuda()
 
         parent_type_list = [trees[i, parent_idx[i], 2] for i in range(trees.size(0))]
-        parent_type = torch.LongTensor(parent_type_list)
+        parent_type = torch.LongTensor(parent_type_list).cuda()
         parent_type_embed = self.type_embedding(parent_type)
 
         attentions = self.tree_attention(trees, first_notes, train)
@@ -300,7 +300,7 @@ class Generator(nn.Module):
             l1 = []
             for j in range(5):
                 l1.append(trees[i, sorted_attention_idx[i, j], 2])
-            l2.append(self.type_embedding(torch.LongTensor(l1)).view(5, self.embed_dim))
+            l2.append(self.type_embedding(torch.LongTensor(l1).cuda()).view(5, self.embed_dim))
         reordered_trees = torch.stack(l2)
         # (batch_size, 5, embed_dim)
         temp_output = self.ff_attention(reordered_trees.view(trees.size(0), -1))

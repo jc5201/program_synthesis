@@ -67,7 +67,7 @@ if not args.disable_terminal_log:
 
 if args.cuda:
     if torch.cuda.is_available():
-        device = torch.device('cuda')
+        torch.cuda.device(0)
         logging.info('use cuda')
     else:
         logging.warn('cuda is not available')
@@ -96,7 +96,7 @@ def main():
     root_node = torch.LongTensor([0, -1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     tree_list = torch.cat([pad_node.expand(batch_size, episode_max - 1, 17),
                            root_node.expand(batch_size, 1, 17)],
-                          dim=1)
+                          dim=1).cuda()
     score_list = [[] for _ in range(batch_size)]
 
     tensorboard_writer = SummaryWriter('runs/' + model_name)
@@ -150,6 +150,7 @@ def main():
 
         for j in range(batch_size):
             if len(score_list[j]) == 0:
+                text_lists[j] = []
                 tree_list[j] = torch.cat([pad_node.expand(1, episode_max - 1, 17),
                                           root_node.expand(1, 1, 17)],
                                          dim=1)
@@ -215,7 +216,7 @@ def ready_data(data, text_dictionary):
 
 def ready_text_for_training(text_data, dictionary):
     int_rep = list(map(lambda x: dictionary.get(x, 0), text_data))
-    return torch.LongTensor(int_rep)
+    return torch.LongTensor(int_rep).cuda()
 
 
 def get_after_put_if_not_exist(dictionary, word):
@@ -239,36 +240,50 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     tree_list = torch.cat([tree_list[:, 1:, ], codes.unsqueeze(1)], dim=1)
     scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
     for i in range(batch_size):
-        score_list[i].append(scores[i].clone())
+        score_list[i].append(scores[i])
     gen_loss = torch.sum(scores) * -1 / len(input_texts)
     gen_loss.backward(retain_graph=True)
     optimizer.step()
 
     disc_loss_list = []
     target_score_list = []
+    ended_idx_list = []
+    ended_tree_list = []
+    ended_score_list = []
+
+    synth_model.set_text_encoder_trainable(True)
+    synth_model.set_generator_trainable(False)
+    synth_model.set_discriminator_trainable(True)
     for i in range(batch_size):
         # (episode length is max) or (last node's parent is root) and (last node is <End>)
         if tree_list[i, 0, 2].item() == 1 or (tree_list[i, -1, 1].item() == 0 and tree_list[i, -1, 2].item() == 2):
+            ended_idx_list.append(i)
             for j in range(tree_list.size(1)):
                 if tree_list[i, j, 2].item() == 1:
                     start_idx = j
                     break
-            synth_model.set_text_encoder_trainable(False)
-            synth_model.set_generator_trainable(False)
-            synth_model.set_discriminator_trainable(True)
-            optimizer.zero_grad()
-            scores = torch.stack(score_list[i])
-            min_score = torch.min(scores)
-            target_score = executor.evaluate_code([tree_list[i, start_idx:, :].detach()], [raw_input_texts[i]], [tests[i]])
-            target_score = torch.Tensor(target_score)
-            disc_loss = torch.nn.MSELoss()(target_score.view(-1), min_score.view(-1))
-            disc_loss.backward(retain_graph=True)
-            optimizer.step()
-            disc_loss_list.append(disc_loss.item())
-            target_score_list.append(target_score.mean().item())
+            ended_tree_list.append(tree_list[i, j:])
+            # ended_score_list.append(torch.stack(score_list[i]).mean())
+    scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
+
+    if len(ended_idx_list) != 0:
+        optimizer.zero_grad()
+        ended_score_list = [scores[i] for i in ended_idx_list]
+        raw_ = [raw_input_texts[i] for i in ended_idx_list]
+        test_ = [tests[i] for i in ended_idx_list]
+        target_score = executor.evaluate_code(ended_tree_list, raw_, test_)
+        target_score = torch.Tensor(target_score).cuda()
+
+        score = torch.stack(ended_score_list)
+        disc_loss = torch.nn.MSELoss()(target_score.view(-1), score.view(-1))
+        disc_loss.backward(retain_graph=True)
+        optimizer.step()
+        disc_loss_list.append(disc_loss.item())
+        target_score_list.append(target_score.mean().item())
+        for i in ended_idx_list:
             score_list[i] = []
-            logging.debug("episode for {} finished:start {}, disc_loss {}, target_score {}"
-                          .format(i, start_idx, disc_loss.item(), target_score.mean().item()))
+        logging.debug("episode for {} finished:disc_loss {}, target_score {}"
+                      .format(ended_idx_list, disc_loss.item(), target_score.mean().item()))
 
     return gen_loss.item(), disc_loss_list, target_score_list, tree_list
 

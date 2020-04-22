@@ -29,7 +29,7 @@ def rec_node_to_ast(tree, text_list):
     children_end_idx = []
     for start_idx in children_start_idx:
         end_idx = -1
-        for j in range(start_idx, tree.size(0)):
+        for j in range(start_idx + 1, tree.size(0)):
             if tree[j, 1] == tree[0, 0]:
                 end_idx = j
                 break
