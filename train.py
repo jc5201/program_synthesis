@@ -83,6 +83,7 @@ def main():
         synth_model, optimizer = create_model(model_name)
     validation_set = [i * 100 for i in range(trainA_len // 100)]
     training_set = list(set(range(trainA_len)) - set(validation_set))
+    random.shuffle(training_set)
     target_epoch = args.epoch
     batch_size = args.batch_size
     episode_max = args.episode_max
@@ -237,11 +238,13 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     synth_model.set_discriminator_trainable(False)
     optimizer.zero_grad()
     codes = synth_model.forward_generator(input_texts, tree_list, train=True)
+    prev_scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
     tree_list = torch.cat([tree_list[:, 1:, ], codes.unsqueeze(1)], dim=1)
     scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
     for i in range(batch_size):
         score_list[i].append(scores[i])
-    gen_loss = torch.sum(scores) * -1 / len(input_texts)
+    gen_loss = (torch.sum(prev_scores - scores)) / len(input_texts)
+    # gen_loss = torch.sum(scores) * -1 / len(input_texts)
     gen_loss.backward(retain_graph=True)
     optimizer.step()
 
@@ -265,7 +268,6 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
             ended_tree_list.append(tree_list[i, j:])
             # ended_score_list.append(torch.stack(score_list[i]).mean())
     scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
-
     if len(ended_idx_list) != 0:
         optimizer.zero_grad()
         ended_score_list = [scores[i] for i in ended_idx_list]

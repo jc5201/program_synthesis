@@ -101,7 +101,7 @@ class Discriminator(nn.Module):
             nn.Linear(self.embed_dim * 14 + lstm_out_dim, self.hidden_dim * 4),
             nn.ReLU(),
             nn.Linear(self.hidden_dim * 4, self.hidden_dim),
-            nn.ReLU()
+            nn.LayerNorm(self.hidden_dim)
         )
         self.child_sum_ff = nn.Sequential(
             nn.Linear(self.hidden_dim * 2, self.hidden_dim * 4),
@@ -120,7 +120,7 @@ class Discriminator(nn.Module):
             nn.Linear(self.hidden_dim * 2, self.hidden_dim * 4),
             nn.ReLU(),
             nn.Linear(self.hidden_dim * 4, self.hidden_dim),
-            nn.ReLU()
+            nn.LayerNorm(self.hidden_dim)
         )
 
         self.ff_model = nn.Sequential(
@@ -137,12 +137,15 @@ class Discriminator(nn.Module):
         children_summary = []
         for start_idx in node_children_idx:
             end_idx = -1
-            for j in range(start_idx + 1, tree.size(0)):
-                if tree[j, 1] == tree[0, 0]:
-                    end_idx = j
-                    break
-            if end_idx == -1:
-                break
+            if tree[start_idx, 2].item() == self.token_list.index('<End>'):
+                end_idx = start_idx + 1
+            else:
+                for j in range(start_idx + 1, tree.size(0)):
+                    if tree[j, 1] == tree[0, 0]:
+                        end_idx = j
+                        break
+                if end_idx == -1:
+                    end_idx = tree.size(1)
             child_tree = tree[start_idx:end_idx, :]
             summary = self.child_sum(child_tree, lstm_out, first_note)
             children_summary.append(summary)
