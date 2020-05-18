@@ -10,6 +10,7 @@ import time
 import random
 import itertools
 import json
+import math
 
 import loader
 import model
@@ -23,8 +24,8 @@ trainA_len = 16410
 parser = argparse.ArgumentParser()
 parser.add_argument('--mode', type=str, default='train',        # TODO
                     help='what to do (train)')
-parser.add_argument('--model', type=str, default='text',        # TODO
-                    help='type of train target (text, generator)')
+parser.add_argument('--target', type=str, default='model',        # TODO
+                    help='type of train target (text, model)')
 parser.add_argument('--epoch', type=int, default='20',
                     help='num of epoch to train')
 parser.add_argument('--batch-size', type=int, default='10',
@@ -74,6 +75,9 @@ if args.cuda:
 
 
 def main():
+    if args.target == 'text':
+        train_text_main()
+        exit(0)
     model_name = args.model_name
     if not model_name:
         logging.error('model name is empty')
@@ -87,7 +91,6 @@ def main():
     target_epoch = args.epoch
     batch_size = args.batch_size
     episode_max = args.episode_max
-    train_target = ['text']
     text_dictionary = loader.load_word_dictionary()
     dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
 
@@ -185,6 +188,69 @@ def main():
     tensorboard_writer.close()
 
 
+def train_text_main():
+    model_name = args.model_name
+    if not model_name:
+        logging.error('model name is empty')
+    if model_exists(model_name):
+        synth_model, optimizer = load_model(model_name)
+    else:
+        synth_model, optimizer = create_model(model_name)
+    validation_set = [i * 100 for i in range(trainA_len // 100)]
+    training_set = list(set(range(trainA_len)) - set(validation_set))
+    random.shuffle(training_set)
+    target_epoch = args.epoch
+    batch_size = args.batch_size
+    text_dictionary = loader.load_word_dictionary()
+    dataset = loader.load_from_jsonl_file(loader.naps_train_A, [])
+
+    tensorboard_writer = SummaryWriter('runs/' + model_name)
+    logging.info('argv : {}'.format(sys.argv))
+
+    train_idx = 0
+    for epoch in range(target_epoch):
+        logging.info('start epoch #{}'.format(epoch))
+        for j in range(math.ceil(len(training_set) / batch_size)):
+            raw_data = load_batch_from(dataset, range(j * batch_size, (j + 1) * batch_size))
+            train_idx += len(raw_data)
+            text_idx_data, groups = ready_data_for_pretraining(raw_data, text_dictionary)
+            text_loss, text_sim_loss, text_diff_loss = \
+                train_text(synth_model, text_idx_data, groups, optimizer)
+            logging.info('finished batch #{}: loss{}, {}, {}'.format(
+                j, text_loss, text_sim_loss, text_diff_loss
+            ))
+            tensorboard_writer.add_scalar('Loss/text', text_loss, train_idx)
+            tensorboard_writer.add_scalar('Loss/text_eq', text_sim_loss, train_idx)
+            tensorboard_writer.add_scalar('Loss/text_diff', text_diff_loss, train_idx)
+        save_model(model_name, synth_model, optimizer)
+
+    tensorboard_writer.close()
+
+
+def train_text(synth_model, input_texts, groups, optimizer):
+    batch_size = len(input_texts)
+
+    # train generator
+    synth_model.set_text_encoder_trainable(True)
+    synth_model.set_generator_trainable(False)
+    synth_model.set_discriminator_trainable(False)
+    optimizer.zero_grad()
+    _, first_notes = synth_model.forward_text_encoder(input_texts, train=True)
+
+    original = range(batch_size)
+    sim_list = [random.choice([x for x, _ in enumerate(groups) if groups[x] == groups[i]]) for i in range(batch_size)]
+    diff_list = [random.choice([x for x, _ in enumerate(groups) if groups[x] != groups[i]]) for i in range(batch_size)]
+
+    mse = torch.nn.MSELoss()
+    loss1 = mse(first_notes[original], first_notes[sim_list])
+    loss2 = mse(first_notes[original], first_notes[diff_list])
+    loss = loss1 - loss2
+    loss.backward()
+    optimizer.step()
+
+    return loss.item(), loss1.item(), loss2.item()
+
+
 def make_batch(training_set, batch_size):
     random.shuffle(training_set)
     return [list(itertools.islice(training_set, batch_size * i, batch_size * (i + 1)))
@@ -215,6 +281,26 @@ def ready_data(data, text_dictionary):
     return text_tensors, raw_texts, tests
 
 
+def ready_data_for_pretraining(data, text_dictionary):
+    text_tensors = []
+    groups = []
+    for i, raw_data in enumerate(data):
+        parsed_data = json.loads(raw_data)
+        if 'text' in parsed_data.keys():
+            text_data = ready_text_for_training(parsed_data['text'], text_dictionary)
+            text_tensors.append(text_data)
+            groups.append(i)
+        elif 'texts' in parsed_data.keys():
+            for j in range(max(len(parsed_data['texts']), 16)):
+                text_data = ready_text_for_training(parsed_data['texts'][j], text_dictionary)
+                text_tensors.append(text_data)
+                groups.append(i)
+        else:
+            logging.error('unexpected data format')
+            raise AssertionError
+    return text_tensors, groups
+
+
 def ready_text_for_training(text_data, dictionary):
     int_rep = list(map(lambda x: dictionary.get(x, 0), text_data))
     return torch.LongTensor(int_rep).cuda()
@@ -233,28 +319,27 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     batch_size = len(input_texts)
 
     # train generator
-    synth_model.set_text_encoder_trainable(True)
+    synth_model.set_text_encoder_trainable(False)
     synth_model.set_generator_trainable(True)
     synth_model.set_discriminator_trainable(False)
     optimizer.zero_grad()
-    codes = synth_model.forward_generator(input_texts, tree_list, train=True)
+    codes, probs = synth_model.forward_generator(input_texts, tree_list, train=True)
     prev_scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
     tree_list = torch.cat([tree_list[:, 1:, ], codes.unsqueeze(1)], dim=1)
     scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
     for i in range(batch_size):
         score_list[i].append(scores[i])
-    gen_loss = (torch.sum(prev_scores - scores)) / len(input_texts)
-    # gen_loss = torch.sum(scores) * -1 / len(input_texts)
-    gen_loss.backward(retain_graph=True)
+
+    gen_loss = (torch.sum(torch.sum(probs, dim=0) * (prev_scores - scores))) / batch_size
+    gen_loss.backward()
     optimizer.step()
 
     disc_loss_list = []
     target_score_list = []
     ended_idx_list = []
     ended_tree_list = []
-    ended_score_list = []
 
-    synth_model.set_text_encoder_trainable(True)
+    synth_model.set_text_encoder_trainable(False)
     synth_model.set_generator_trainable(False)
     synth_model.set_discriminator_trainable(True)
     for i in range(batch_size):
@@ -267,8 +352,8 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
                     break
             ended_tree_list.append(tree_list[i, j:])
             # ended_score_list.append(torch.stack(score_list[i]).mean())
-    scores = synth_model.forward_discriminator(input_texts, tree_list, train=True)
     if len(ended_idx_list) != 0:
+        scores = synth_model.forward_full_discriminator(input_texts, tree_list, train=True)
         optimizer.zero_grad()
         ended_score_list = [scores[i] for i in ended_idx_list]
         raw_ = [raw_input_texts[i] for i in ended_idx_list]
@@ -277,8 +362,9 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
         target_score = torch.Tensor(target_score).cuda()
 
         score = torch.stack(ended_score_list)
-        disc_loss = torch.nn.MSELoss()(target_score.view(-1), score.view(-1))
-        disc_loss.backward(retain_graph=True)
+        min_score, _ = torch.min(score, dim=1)
+        disc_loss = torch.nn.MSELoss()(target_score.view(-1), min_score.view(-1))
+        disc_loss.backward()
         optimizer.step()
         disc_loss_list.append(disc_loss.item())
         target_score_list.append(target_score.mean().item())

@@ -24,6 +24,10 @@ class CodeSynthesisModel:
         lstm_out_list, first_notes = self.forward_text_encoder(texts, train)
         return self.discriminator.forward(lstm_out_list, first_notes, trees, train)
 
+    def forward_full_discriminator(self, texts, trees, train=True):
+        lstm_out_list, first_notes = self.forward_text_encoder(texts, train)
+        return self.discriminator.forward_full(lstm_out_list, first_notes, trees, train)
+
     def get_steps(self):
         return self.step
 
@@ -224,6 +228,27 @@ class Discriminator(nn.Module):
         score = self.tail_score(ff_out)
         return score
 
+    def forward_full(self, lstm_out_list, first_notes, trees, train=True):
+        # (batch_size, episode_len, 17)
+        scores = []
+        for max_len in range(2, trees.size(1)):
+            tree_sum = []
+            for i, (note, tree) in enumerate(zip(first_notes, trees)):
+                start_idx = -1
+                for j in range(trees.size(1)):
+                    if tree[j, 2] == self.token_list.index('<root>'):
+                        start_idx = j
+                        break
+                assert start_idx != -1
+                summary = self.attentional_recent_discriminator(tree[start_idx:start_idx + max_len, :], lstm_out_list[i], note)
+                tree_sum.append(summary)
+
+            ff_out = self.ff_model(torch.cat(tree_sum, dim=0))
+            score = self.tail_score(ff_out)
+            # (batch_size, 1)
+            scores.append(score)
+        return torch.cat(scores, dim=1)
+
 
 class Generator(nn.Module):
     def __init__(self, note_dim, lstm_out_dim):
@@ -283,12 +308,15 @@ class Generator(nn.Module):
 
     def predict_const_copy(self, notes, lstm_out, train):
         pointers = []
+        probs = []
         for i in range(notes.size(0)):
             l = lstm_out[i].size(0)
             note = notes[i]
             cc = torch.cat([note.expand(l, notes.size(1)), lstm_out[i].view(l, -1)], dim=1)
-            pointers.append(self.pick(nn.Softmax(dim=1)(self.ptr_ff(cc).view(1, -1)), 0, train))
-        return torch.cat(pointers, dim=0)
+            pointer, prob = self.pick(nn.Softmax(dim=1)(self.ptr_ff(cc).view(1, -1)), 0, train)
+            pointers.append(pointer)
+            probs.append(prob)
+        return torch.cat(pointers, dim=0), torch.cat(probs, dim=0)
 
     def pick(self, prob, offset, train):
         if train:
@@ -296,7 +324,7 @@ class Generator(nn.Module):
             result = dist.sample()
         else:
             _, result = torch.max(prob.view(-1), 0)
-        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).expand(prob.size(0), 1).cuda()
+        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).expand(prob.size(0), 1).cuda(), prob[:, result]
 
     def tree_attention(self, trees, first_notes, train):
         embeded_code = self.type_embedding(trees[:, :, 2])
@@ -348,27 +376,31 @@ class Generator(nn.Module):
         temp_output = self.ff_attention(reordered_trees.view(trees.size(0), -1))
         temp_output = self.ff_combine(torch.cat([parent_type_embed, temp_output], dim=1))
 
-        type = self.pick(self.predict_type(temp_output), 2, train)
-        value1 = self.pick(self.predict_bin_op(temp_output), 0, train)
-        value2 = self.pick(self.predict_cmp_op(temp_output), 0, train)
-        value3 = self.pick(self.predict_unary_op(temp_output), 0, train)
-        value4 = self.pick(self.predict_func_type(temp_output), 26, train)
-        value5 = self.pick(self.predict_builtin_func(temp_output), 0, train)
-        value6 = self.pick(self.predict_func_name(temp_output), 0, train)
-        value7 = self.pick(self.predict_var_type(temp_output), 21, train)
-        value8 = self.pick(self.predict_arg_name(temp_output), 0, train)
-        value9 = self.pick(self.predict_var_name(temp_output), 0, train)
-        value10 = self.pick(self.predict_const_type(temp_output), 23, train)
-        value11 = self.pick(self.predict_const_int(temp_output), 0, train)
-        value12 = self.pick(self.predict_const_float(temp_output), 0, train)
-        value13 = self.pick(self.predict_args_num(temp_output), 0, train)
-        value14 = self.predict_const_copy(temp_output, lstm_out_list, train)
+        type, type_p = self.pick(self.predict_type(temp_output), 2, train)
+        value1, value1_p = self.pick(self.predict_bin_op(temp_output), 0, train)
+        value2, value2_p = self.pick(self.predict_cmp_op(temp_output), 0, train)
+        value3, value3_p = self.pick(self.predict_unary_op(temp_output), 0, train)
+        value4, value4_p = self.pick(self.predict_func_type(temp_output), 26, train)
+        value5, value5_p = self.pick(self.predict_builtin_func(temp_output), 0, train)
+        value6, value6_p = self.pick(self.predict_func_name(temp_output), 0, train)
+        value7, value7_p = self.pick(self.predict_var_type(temp_output), 21, train)
+        value8, value8_p = self.pick(self.predict_arg_name(temp_output), 0, train)
+        value9, value9_p = self.pick(self.predict_var_name(temp_output), 0, train)
+        value10, value10_p = self.pick(self.predict_const_type(temp_output), 23, train)
+        value11, value11_p = self.pick(self.predict_const_int(temp_output), 0, train)
+        value12, value12_p = self.pick(self.predict_const_float(temp_output), 0, train)
+        value13, value13_p = self.pick(self.predict_args_num(temp_output), 0, train)
+        value14, value14_p = self.predict_const_copy(temp_output, lstm_out_list, train)
 
-        return torch.cat([idx, parent_idx, type,
-                          value1, value2, value3, value4, value5,
-                          value6, value7, value8, value9, value10,
-                          value11, value12, value13, value14], dim=1)
-
+        next_node = torch.cat([idx, parent_idx, type,
+                               value1, value2, value3, value4, value5,
+                               value6, value7, value8, value9, value10,
+                               value11, value12, value13, value14], dim=1)
+        next_prediction = torch.cat([type_p,
+                                     value1_p, value2_p, value3_p, value4_p, value5_p,
+                                     value6_p, value7_p, value8_p, value9_p, value10_p,
+                                     value11_p, value12_p, value13_p, value14_p], dim=1)
+        return next_node, next_prediction
 
 class PositionalEncoding(nn.Module):
 
