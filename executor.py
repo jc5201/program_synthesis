@@ -205,24 +205,24 @@ def evaluate_code(trees, texts, tests):
             python_ast = node_to_ast(tree, text)
             code = ast_to_code(python_ast)
         except Exception as ex:
-            scores.append(-3.0)
+            scores.append(0.0)
             continue
         try:
             compile_code(code)
         except Exception as ex:
-            scores.append(-2.0)
+            scores.append(1.0)
             continue
         try:
-            score = 0
+            score = 3.0
             for case in test:
                 input = case['input']
                 output = case['output']
                 result = execute_code(code, input)
                 if check_equal(result, output):
-                    score = score + 1.0 / len(tests)
+                    score = score + 4.0 / len(tests)
             scores.append(score)
         except Exception as ex:
-            scores.append(-1.0)
+            scores.append(2.0)
             continue
     return scores
 

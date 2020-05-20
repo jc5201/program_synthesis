@@ -327,9 +327,9 @@ class Generator(nn.Module):
         return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).expand(prob.size(0), 1).cuda(), prob[:, result]
 
     def tree_attention(self, trees, first_notes, train):
-        embeded_code = self.type_embedding(trees[:, :, 2])
+        embedded_code = self.type_embedding(trees[:, :, 2])
         # (batch_size, episode_len, embed_dim)
-        code_lstm_out, _ = self.code_lstm(embeded_code)
+        code_lstm_out, _ = self.code_lstm(embedded_code)
         # (batch_size, episode_len, note_dim)
         notes = [first_notes.unsqueeze(1)]
         for i in range(trees.size(1)):
@@ -401,6 +401,7 @@ class Generator(nn.Module):
                                      value6_p, value7_p, value8_p, value9_p, value10_p,
                                      value11_p, value12_p, value13_p, value14_p], dim=1)
         return next_node, next_prediction
+
 
 class PositionalEncoding(nn.Module):
 

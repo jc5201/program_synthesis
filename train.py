@@ -19,7 +19,12 @@ import executor
 log_dir = './log'
 model_save_dir = './log'
 model_filename = './model.py'
+train_filename = './train.py'
 trainA_len = 16410
+
+gen_loss = 0
+generator_train_cnt = 0
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--mode', type=str, default='train',        # TODO
@@ -30,6 +35,8 @@ parser.add_argument('--epoch', type=int, default='20',
                     help='num of epoch to train')
 parser.add_argument('--batch-size', type=int, default='10',
                     help='batch size')
+parser.add_argument('--discount', type=float, default='0.99',
+                    help='score discount rate')
 parser.add_argument('--text-learning-rate', type=float, default='1e-3',
                     help='learning rate for text encoder')
 parser.add_argument('--generator-learning-rate', type=float, default='1e-3',
@@ -138,6 +145,7 @@ def main():
                 text_list.append(tests[0])
             if train_idx == len(training_set):
                 # epoch finished
+                '''
                 raw_data = load_batch_from(dataset, validation_set)
                 text_idx_data, text_data, tests = ready_data(raw_data, text_dictionary)
                 eval_gen_loss, eval_dis_loss = evaluate_vector_representation(synth_model, text_idx_data, text_data, tests)
@@ -146,6 +154,7 @@ def main():
                     epoch, eval_gen_loss, eval_dis_loss))
                 tensorboard_writer.add_scalar('Eval/gen', eval_gen_loss, epoch)
                 tensorboard_writer.add_scalar('Eval/dis', eval_dis_loss, epoch)
+                '''
                 epoch += 1
                 train_idx = 0
                 if epoch == target_epoch:
@@ -335,9 +344,16 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     for i in range(batch_size):
         score_list[i].append(scores[i])
 
-    gen_loss = (torch.sum(torch.log(torch.mean(probs, dim=1)) * (prev_scores - scores))) / batch_size
-    gen_loss.backward()
-    optimizer.step()
+    global gen_loss
+    gen_loss += (torch.sum(torch.log(torch.mean(probs, dim=1)) * (prev_scores - scores))) / batch_size
+
+    global generator_train_cnt
+    generator_train_cnt += 1
+    if generator_train_cnt % 21 == 0:
+        gen_loss = gen_loss / 21
+        gen_loss.backward()
+        optimizer.step()
+        gen_loss = torch.FloatTensor([0]).cuda()
 
     disc_loss_list = []
     target_score_list = []
@@ -367,8 +383,15 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
         target_score = torch.Tensor(target_score).cuda()
 
         score = scores[ended_idx_list]
-        min_score, _ = torch.min(score, dim=1)
-        disc_loss = torch.nn.MSELoss(reduction='mean')(target_score.view(-1), min_score.view(-1))
+        mse = torch.nn.MSELoss(reduction='mean')
+        disc_loss = 0
+        for i in range(score.size(0)):
+            j = score.size(1) - 1
+            loss = mse(target_score[i], score[i, j])
+            while j > 0:
+                j = j - 1
+                loss += mse(score[i, j + 1] * args.discount, score[i, j])
+            disc_loss += loss
         disc_loss.backward()
         optimizer.step()
         disc_loss_list.append(disc_loss.item())
@@ -414,6 +437,7 @@ def create_model(model_name, text_model_name=None):
             os.remove(model_dir)
     os.mkdir(model_dir)
     shutil.copy(model_filename, model_dir)
+    shutil.copy(train_filename, model_dir)
 
     return synth_model, optimizer
 
