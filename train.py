@@ -345,7 +345,7 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
         score_list[i].append(scores[i])
 
     global gen_loss
-    gen_loss += (torch.sum(torch.log(torch.mean(probs, dim=1)) * (prev_scores - scores))) / batch_size
+    gen_loss += (torch.sum(torch.log(torch.mean(probs, dim=1)) * (prev_scores * args.discount - scores))) / batch_size
 
     global generator_train_cnt
     generator_train_cnt += 1

@@ -240,7 +240,7 @@ class Discriminator(nn.Module):
                         start_idx = j
                         break
                 assert start_idx != -1
-                summary = self.attentional_recent_discriminator(tree[start_idx:start_idx + max_len, :], lstm_out_list[i], note)
+                summary = self.attentional_recent_discriminator(tree[start_idx:max(max_len, start_idx + 1), :], lstm_out_list[i], note)
                 tree_sum.append(summary)
 
             ff_out = self.ff_model(torch.cat(tree_sum, dim=0))
