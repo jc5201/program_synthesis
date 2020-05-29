@@ -48,8 +48,7 @@ def rec_node_to_ast(tree, text_list):
         assert len(children_start_idx) == 1
         assert ast_gen_helper.token_list[children_start_idx[0][2].item()] == '<stmts>'
         func_name = 'func' + str(tree[0, 6 + 2].item())
-        args_num = tree[0, 13 + 2].item()
-        args_list = [ast.arg('arg' + str(i), None) for i in range(args_num)]
+        args_list = [ast.arg('arg', None)]
         ast_args = ast.arguments(args=args_list, vararg=None, kwonlyargs=[],
                                  kw_defaults=[], kwarg=None, defaults=[])
         ast_body = rec_node_to_ast(tree[children_start_idx[0]:children_end_idx[0]], text_list)
@@ -100,23 +99,25 @@ def rec_node_to_ast(tree, text_list):
         if func_type == '<func_type_func>':
             func_idx = tree[0, 6 + 2].item()
             ast_func_name = ast.Name('func' + str(func_idx), ast.Load())
+            ast_args = rec_node_to_ast(tree[children_start_idx[0]:children_end_idx[0]], text_list)
+            ast_node = ast.Call(ast_func_name, ast.List(ast_args, ast.Load()), [])
         else:
             func_idx = tree[0, 5 + 2].item()
             ast_func_name = ast.Name(ast_gen_helper.builtin_func_list[func_idx], ast.Load())
-        ast_args = rec_node_to_ast(tree[children_start_idx[0]:children_end_idx[0]], text_list)
-        ast_node = ast.Call(ast_func_name, ast_args, [])
+            ast_args = rec_node_to_ast(tree[children_start_idx[0]:children_end_idx[0]], text_list)
+            ast_node = ast.Call(ast_func_name, ast_args, [])
         return ast_node
     elif node_type == 'var':
         assert len(children_start_idx) == 0
         var_type = ast_gen_helper.token_list[tree[0, 7 + 2].item()]
         if var_type == '<var_type_var>':
             var_name = 'var' + str(tree[0, 9 + 2].item())
+            ast_node = ast.Name(var_name)
+            return ast_node
         elif var_type == '<var_type_arg>':
-            var_name = 'arg' + str(tree[0, 8 + 2].item())
-        else:
-            assert False
-        ast_node = ast.Name(var_name)
-        return ast_node
+            arg_num = str(tree[0, 8 + 2].item())
+            ast_node = ast.Subscript(ast.Name('arg'), ast.Constant(arg_num), ast.Load())
+            return ast_node
     elif node_type == 'val':
         assert len(children_start_idx) == 0
         const_type = ast_gen_helper.token_list[tree[0, 10 + 2].item()]

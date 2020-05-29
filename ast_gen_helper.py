@@ -22,12 +22,13 @@ const_int_list = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100]
 
 const_float_list = [-1.0, 0.0, 0.01, 0.1, 1.0, 2.0, 3.0, 10.0, 100.0, 1000.0]
 
-func_num_limit = 20
-arg_num_limit = 10
-var_num_limit = 20
+func_num_limit = 2
+arg_num_limit = 4
+var_num_limit = 5
 
 
 add_prefix = lambda x, y:list(map(lambda e: y + e if isinstance(e, str) else y + str(e), x))
+
 all_token_list = token_list \
                  + bin_op_list \
                  + cmp_op_list \

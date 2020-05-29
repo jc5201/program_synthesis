@@ -108,10 +108,10 @@ def main():
 
     current_set = [0 for _ in range(batch_size)]
     text_lists = [[] for _ in range(batch_size)]
-    pad_node = torch.LongTensor([-1, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])
-    root_node = torch.LongTensor([0, -1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-    tree_list = torch.cat([pad_node.expand(batch_size, episode_max - 1, 17),
-                           root_node.expand(batch_size, 1, 17)],
+    pad_node = torch.LongTensor([-1, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])
+    root_node = torch.LongTensor([0, -1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    tree_list = torch.cat([pad_node.expand(batch_size, episode_max - 1, 16),
+                           root_node.expand(batch_size, 1, 16)],
                           dim=1).cuda()
     score_list = [[] for _ in range(batch_size)]
 
@@ -169,8 +169,8 @@ def main():
         for j in range(batch_size):
             if len(score_list[j]) == 0:
                 text_lists[j] = []
-                tree_list[j] = torch.cat([pad_node.expand(1, episode_max - 1, 17),
-                                          root_node.expand(1, 1, 17)],
+                tree_list[j] = torch.cat([pad_node.expand(1, episode_max - 1, 16),
+                                          root_node.expand(1, 1, 16)],
                                          dim=1)
 
         gen_loss_list.append(gen_loss)
@@ -347,7 +347,7 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
     global gen_loss
     type_probs = probs[:, 0]
     tpd = type_probs.clone().detach()
-    clipped_probs = (type_probs / tpd).clamp(min=0.8, max=1.2) * tpd
+    clipped_probs = ((type_probs / tpd).clamp(min=0.8, max=1.2) * tpd).clamp(min=0.005, max=0.9)
     gen_loss += (torch.sum(torch.log(clipped_probs) * (prev_scores * args.discount - scores))) / batch_size
 
     global generator_train_cnt
@@ -428,7 +428,10 @@ def create_model(model_name, text_model_name=None):
                                                         args.discriminator_learning_rate))
 
     if text_model_name:
-        text_model, _ = load_model(text_model_name)
+        text_path = model_save_dir + '/' + text_model_name + '/' + 'model.pkl'
+        ckp = torch.load(text_path)
+        text_model = model.CodeSynthesisModel(args.note_dim)
+        load_text_state_dict(text_model, ckp['model'])
         synth_model.text_encoder = text_model.text_encoder
 
     model_dir = model_save_dir + '/' + model_name
@@ -484,11 +487,21 @@ def load_model(model_name, text_model_name=None, step=None):
     synth_model.step = ckp['step']
     optimizer.load_state_dict(ckp['optim'])
     if text_model_name:
-        text_model, _ = load_model(text_model_name)
+        text_path = model_save_dir + '/' + text_model_name + '/' + 'model.pkl'
+        ckp = torch.load(text_path)
+        text_model = model.CodeSynthesisModel(args.note_dim)
+        load_text_state_dict(text_model, ckp['model'])
         synth_model.text_encoder = text_model.text_encoder
     logging.info('loaded model {} from {}'.format(model_name, path))
     return synth_model, optimizer
 
+
+def load_text_state_dict(model, old_state):
+    for name, param in old_state.items():
+        if name not in model.state_dict():
+            continue
+        if name.startswith('text_encoder'):
+            model.state_dict()[name].copy_(param)
 
 if __name__ == '__main__':
     main()

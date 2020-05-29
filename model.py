@@ -118,7 +118,7 @@ class Discriminator(nn.Module):
             nn.Linear(self.node_dim, 1)
         )
         self.tree_att_ff = nn.Sequential(
-            nn.Linear(self.hidden_dim * 6, self.hidden_dim * 2),
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim * 2),
             nn.ReLU(),
             nn.Linear(self.hidden_dim * 2, self.hidden_dim),
             nn.ReLU())
@@ -129,29 +129,24 @@ class Discriminator(nn.Module):
         )
 
     def attentional_recent_discriminator(self, tree, lstm_out, first_note):
-        # (episode_len, 17)
+        # (episode_len, 16)
         node_embedded = self.embedding(tree[:, 2:-1]).view(tree.size(0), -1)
-        # (episode_len, 14 * embed_dim)
+        # (episode_len, 13 * embed_dim)
         pos_encoding = torch.cat([self.positional_encoding(tree[:, 0]), self.positional_encoding(tree[:, 1])], dim=2).view(tree.size(0), -1)
         # (episode_len, 2 *pe_dim)
         node_vec = torch.cat([pos_encoding, node_embedded[:, :self.embed_dim], lstm_out[tree[:, -1], 0, :], first_note.expand(tree.size(0), first_note.size(0))], dim=1)
-        # (episode_len, 2 *pe_dim + 14 * embed_dim + lstm_out_dim)
+        # (episode_len, 2 *pe_dim + 13 * embed_dim + lstm_out_dim)
         attentions = self.tree_attention(torch.cat([node_vec[-1].expand(tree.size(0), node_vec.size(1)), node_vec], dim=1))
         # (episode_len, 1)
 
-        sorted_attention_value, sorted_attention_idx = attentions.sort(1, True)
+        attention_sum = torch.sum(node_vec * attentions, dim=0)
+        # (2 *pe_dim + 13 * embed_dim + lstm_out_dim)
 
-        reordered_tree = node_vec[sorted_attention_idx[:5], :].squeeze(1)
-        if reordered_tree.size(0) < 5:
-            pad = torch.zeros(5 - reordered_tree.size(0), reordered_tree.size(1)).cuda()
-            reordered_tree = torch.cat([reordered_tree, pad], dim=0)
-        # (5, 2 *pe_dim + 14 * embed_dim + lstm_out_dim)
-
-        hidden = self.node_ff(torch.cat([node_vec[-1].unsqueeze(0), reordered_tree], dim=0))
+        hidden = self.node_ff(torch.cat([node_vec[-1].unsqueeze(0), attention_sum.unsqueeze(0)], dim=0))
         return self.tree_att_ff(hidden.view(1, -1))
 
     def forward(self, lstm_out_list, first_notes, trees, train):
-        # (batch_size, episode_len, 17)
+        # (batch_size, episode_len, 16)
         tree_sum = []
         for i, (note, tree) in enumerate(zip(first_notes, trees)):
             start_idx = -1
@@ -215,7 +210,6 @@ class Generator(nn.Module):
         self.code_lstm = nn.LSTM(self.embed_dim, self.note_dim, 2)
         self.next_note = nn.Linear(self.note_dim * 3, self.note_dim)
         self.ff_attention = nn.Sequential(
-            nn.Linear(self.embed_dim * 5, self.embed_dim * 2),
             nn.Linear(self.embed_dim * 2, self.embed_dim * 1),
             nn.Tanh()
         )
@@ -299,18 +293,14 @@ class Generator(nn.Module):
         parent_type = torch.LongTensor(parent_type_list).cuda()
         parent_type_embed = self.type_embedding(parent_type)
 
-        attentions = self.tree_attention(trees, first_notes, train)
-        sorted_attention_value, sorted_attention_idx = attentions.sort(1, True)
+        attentions = self.tree_attention(trees, first_notes, train).unsqueeze(2)
+        # (batch_size, episode_len, 1)
+        types = self.type_embedding(trees[:, :, 2])
+        # (batch_size, episode_len, embed_dim)
+        attention_sum = torch.sum(types * attentions, dim=1)
+        # (batch_size, embed_dim)
 
-        l2 = []
-        for i in range(trees.size(0)):
-            l1 = []
-            for j in range(5):
-                l1.append(trees[i, sorted_attention_idx[i, j], 2])
-            l2.append(self.type_embedding(torch.LongTensor(l1).cuda()).view(5, self.embed_dim))
-        reordered_trees = torch.stack(l2)
-        # (batch_size, 5, embed_dim)
-        temp_output = self.ff_attention(reordered_trees.view(trees.size(0), -1))
+        temp_output = self.ff_attention(torch.cat([types[:, -1, :], attention_sum], dim=1))
         temp_output = self.ff_combine(torch.cat([parent_type_embed, temp_output], dim=1))
 
         type, type_p = self.pick(self.predict_type(temp_output), 2, train)
@@ -326,17 +316,16 @@ class Generator(nn.Module):
         value10, value10_p = self.pick(self.predict_const_type(temp_output), 23, train)
         value11, value11_p = self.pick(self.predict_const_int(temp_output), 0, train)
         value12, value12_p = self.pick(self.predict_const_float(temp_output), 0, train)
-        value13, value13_p = self.pick(self.predict_args_num(temp_output), 0, train)
         value14, value14_p = self.predict_const_copy(temp_output, lstm_out_list, train)
 
         next_node = torch.cat([idx, parent_idx, type,
                                value1, value2, value3, value4, value5,
                                value6, value7, value8, value9, value10,
-                               value11, value12, value13, value14], dim=1)
+                               value11, value12, value14], dim=1)
         next_prediction = torch.cat([type_p,
                                      value1_p, value2_p, value3_p, value4_p, value5_p,
                                      value6_p, value7_p, value8_p, value9_p, value10_p,
-                                     value11_p, value12_p, value13_p, value14_p], dim=1)
+                                     value11_p, value12_p, value14_p], dim=1)
         return next_node, next_prediction
 
 
