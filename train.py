@@ -345,7 +345,10 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
         score_list[i].append(scores[i])
 
     global gen_loss
-    gen_loss += (torch.sum(torch.log(torch.mean(probs, dim=1)) * (prev_scores * args.discount - scores))) / batch_size
+    type_probs = probs[:, 0]
+    tpd = type_probs.clone().detach()
+    clipped_probs = (type_probs / tpd).clamp(min=0.8, max=1.2) * tpd
+    gen_loss += (torch.sum(torch.log(clipped_probs) * (prev_scores * args.discount - scores))) / batch_size
 
     global generator_train_cnt
     generator_train_cnt += 1
@@ -374,15 +377,14 @@ def train_vector_representation(synth_model, input_texts, raw_input_texts, tests
             ended_tree_list.append(tree_list[i, j:])
             # ended_score_list.append(torch.stack(score_list[i]).mean())
     if len(ended_idx_list) != 0:
-        scores = synth_model.forward_full_discriminator(input_texts, tree_list, train=True)
         optimizer.zero_grad()
-        #ended_score_list = [scores[i] for i in ended_idx_list]
+        input_texts_ = [input_texts[i] for i in ended_idx_list]
+        score = synth_model.forward_full_discriminator(input_texts_, tree_list[ended_idx_list], train=True)
         raw_ = [raw_input_texts[i] for i in ended_idx_list]
         test_ = [tests[i] for i in ended_idx_list]
         target_score = executor.evaluate_code(ended_tree_list, raw_, test_)
         target_score = torch.Tensor(target_score).cuda()
 
-        score = scores[ended_idx_list]
         mse = torch.nn.MSELoss(reduction='mean')
         disc_loss = 0
         for i in range(score.size(0)):
@@ -444,32 +446,47 @@ def create_model(model_name, text_model_name=None):
 
 def save_model(model_name, synth_model, optimizer, step=None):
     if step:
-        model_path = model_save_dir + '/' + model_name + '/' + 'model_{}.pkl'.format(step)
-        optim_path = model_save_dir + '/' + model_name + '/' + 'optimizer_{}.pkl'.format(step)
-    else:
-        model_path = model_save_dir + '/' + model_name + '/' + 'model.pkl'
-        optim_path = model_save_dir + '/' + model_name + '/' + 'optimizer.pkl'
-    if os.path.exists(model_path):
-        os.remove(model_path)
-        logging.info('deleted previous model in {}'.format(model_path))
-    torch.save(synth_model, model_path)
-    torch.save(optimizer, optim_path)
-    logging.info('saved model {} into {}'.format(model_name, model_path))
+        path = model_save_dir + '/' + model_name + '/' + 'model_{}.pkl'.format(step)
+        if os.path.exists(path):
+            os.remove(path)
+            logging.info('deleted previous model in {}'.format(path))
+        torch.save({
+            'model': synth_model.state_dict(),
+            'optim': optimizer.state_dict(),
+            'step': synth_model.step
+            }, path)
+        logging.info('saved model {} into {}'.format(model_name, path))
+
+    path = model_save_dir + '/' + model_name + '/' + 'model.pkl'
+    if os.path.exists(path):
+        os.remove(path)
+        logging.info('deleted previous model in {}'.format(path))
+    torch.save({
+        'model': synth_model.state_dict(),
+        'optim': optimizer.state_dict(),
+        'step': synth_model.step
+        }, path)
+    logging.info('saved model {} into {}'.format(model_name, path))
 
 
 def load_model(model_name, text_model_name=None, step=None):
     if step:
-        model_path = model_save_dir + '/' + model_name + '/' + 'model_{}.pkl'.format(step)
-        optim_path = model_save_dir + '/' + model_name + '/' + 'optimizer_{}.pkl'.format(step)
+        path = model_save_dir + '/' + model_name + '/' + 'model_{}.pkl'.format(step)
     else:
-        model_path = model_save_dir + '/' + model_name + '/' + 'model.pkl'
-        optim_path = model_save_dir + '/' + model_name + '/' + 'optimizer.pkl'
-    synth_model = torch.load(model_path)
-    optimizer = torch.load(optim_path)
+        path = model_save_dir + '/' + model_name + '/' + 'model.pkl'
+
+    synth_model = model.CodeSynthesisModel(args.note_dim)
+    optimizer = torch.optim.Adam(synth_model.parameters(args.text_learning_rate, args.generator_learning_rate,
+                                                        args.discriminator_learning_rate))
+
+    ckp = torch.load(path)
+    synth_model.load_state_dict(ckp['model'])
+    synth_model.step = ckp['step']
+    optimizer.load_state_dict(ckp['optim'])
     if text_model_name:
         text_model, _ = load_model(text_model_name)
         synth_model.text_encoder = text_model.text_encoder
-    logging.info('loaded model {} from {}'.format(model_name, model_path))
+    logging.info('loaded model {} from {}'.format(model_name, path))
     return synth_model, optimizer
 
 

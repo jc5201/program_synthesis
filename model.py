@@ -4,8 +4,9 @@ import math
 import ast_gen_helper
 
 
-class CodeSynthesisModel:
+class CodeSynthesisModel(nn.Module):
     def __init__(self, note_dim=16):
+        super(CodeSynthesisModel, self).__init__()
         lstm_out_dim = 32
         self.text_encoder = TextEncoder(note_dim, lstm_out_dim).cuda()
         self.generator = Generator(note_dim, lstm_out_dim).cuda()
@@ -94,41 +95,22 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         embed_dict_size = 200
-        self.embed_dim = 16
+        self.embed_dim = 8
         self.pos_enc_dim = 8
         lstm_out_dim = lstm_out_dim
-        self.node_dim = 2 * self.pos_enc_dim + 14 * self.embed_dim + lstm_out_dim
-        self.hidden_dim = 32
+        self.node_dim = 2 * self.pos_enc_dim + 1 * self.embed_dim + lstm_out_dim + note_dim
+        self.hidden_dim = 16
 
         self.token_list = ast_gen_helper.all_token_list
 
         self.embedding = nn.Embedding(embed_dict_size, self.embed_dim)
         self.positional_encoding = PositionalEncoding(self.pos_enc_dim, max_len=200)
-        self.leaf_end_ff = nn.Linear(self.embed_dim, self.hidden_dim)
-        self.leaf_child_ff = nn.Sequential(
-            nn.Linear(self.embed_dim * 14 + lstm_out_dim, self.hidden_dim * 4),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
-            nn.LayerNorm(self.hidden_dim)
-        )
-        self.child_sum_ff = nn.Sequential(
-            nn.Linear(self.hidden_dim * 2, self.hidden_dim * 4),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
-            nn.ReLU()
-        )
 
         self.node_ff = nn.Sequential(
-            nn.Linear(self.pos_enc_dim * 2 + self.embed_dim * 14 + lstm_out_dim, self.hidden_dim * 4),
+            nn.Linear(self.node_dim, self.hidden_dim * 2),
             nn.ReLU(),
-            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
             nn.ReLU()
-        )
-        self.combine_ff = nn.Sequential(
-            nn.Linear(self.hidden_dim * 2, self.hidden_dim * 4),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
-            nn.LayerNorm(self.hidden_dim)
         )
 
         self.tree_attention = nn.Sequential(
@@ -136,58 +118,15 @@ class Discriminator(nn.Module):
             nn.Linear(self.node_dim, 1)
         )
         self.tree_att_ff = nn.Sequential(
-            nn.Linear(self.hidden_dim * 6, self.hidden_dim * 4),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim * 4, self.hidden_dim),
-            nn.ReLU())
-
-        self.ff_model = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim * 2),
+            nn.Linear(self.hidden_dim * 6, self.hidden_dim * 2),
             nn.ReLU(),
             nn.Linear(self.hidden_dim * 2, self.hidden_dim),
-            nn.ReLU()
-        )
+            nn.ReLU())
+
         self.tail_score = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim * 1),
             nn.Linear(self.hidden_dim, 1)
         )
-
-    def child_sum(self, tree, lstm_out, first_note):
-        node_type = tree[0, 2]
-        node_children_idx = list(filter(lambda x: tree[x, 1] == tree[0, 0], range(tree.size(0))))
-        children_summary = []
-        for start_idx in node_children_idx:
-            end_idx = -1
-            if tree[start_idx, 2].item() == self.token_list.index('<End>'):
-                end_idx = start_idx + 1
-            else:
-                for j in range(start_idx + 1, tree.size(0)):
-                    if tree[j, 1] == tree[0, 0]:
-                        end_idx = j
-                        break
-                if end_idx == -1:
-                    end_idx = tree.size(1)
-            child_tree = tree[start_idx:end_idx, :]
-            summary = self.child_sum(child_tree, lstm_out, first_note)
-            children_summary.append(summary)
-
-        if len(children_summary) == 0:
-            if node_type.item() == self.token_list.index('<End>'):
-                return self.leaf_end_ff(self.embedding(node_type)).view(1, -1)
-            else:
-                embedded = self.embedding(tree[0, 2:-1])
-                ptr_embedded = lstm_out[tree[0, -1], 0, :]
-                # (15, embed_dim)
-                return self.leaf_child_ff(torch.cat([embedded.view(-1), ptr_embedded], dim=0).view(1, -1))
-
-        child_summary = children_summary[0]
-        for i in range(1, len(children_summary)):
-            child_summary = self.child_sum_ff(torch.cat([child_summary, children_summary[i]], dim=1))
-
-        node_embedded = self.embedding(tree[0, 2:-1])
-        node_ptr_embedded = lstm_out[tree[0, -1], 0, :]
-        node_tmp = self.node_ff(torch.cat([node_embedded.view(-1), node_ptr_embedded], dim=0).view(1, -1))
-
-        return self.combine_ff(torch.cat([node_tmp, child_summary], dim=1))
 
     def attentional_recent_discriminator(self, tree, lstm_out, first_note):
         # (episode_len, 17)
@@ -195,7 +134,7 @@ class Discriminator(nn.Module):
         # (episode_len, 14 * embed_dim)
         pos_encoding = torch.cat([self.positional_encoding(tree[:, 0]), self.positional_encoding(tree[:, 1])], dim=2).view(tree.size(0), -1)
         # (episode_len, 2 *pe_dim)
-        node_vec = torch.cat([pos_encoding, node_embedded, lstm_out[tree[:, -1], 0, :]], dim=1)
+        node_vec = torch.cat([pos_encoding, node_embedded[:, :self.embed_dim], lstm_out[tree[:, -1], 0, :], first_note.expand(tree.size(0), first_note.size(0))], dim=1)
         # (episode_len, 2 *pe_dim + 14 * embed_dim + lstm_out_dim)
         attentions = self.tree_attention(torch.cat([node_vec[-1].expand(tree.size(0), node_vec.size(1)), node_vec], dim=1))
         # (episode_len, 1)
@@ -224,14 +163,13 @@ class Discriminator(nn.Module):
             summary = self.attentional_recent_discriminator(tree[start_idx:, :], lstm_out_list[i], note)
             tree_sum.append(summary)
 
-        ff_out = self.ff_model(torch.cat(tree_sum, dim=0))
-        score = self.tail_score(ff_out)
+        score = self.tail_score(torch.cat(tree_sum, dim=0))
         return score
 
     def forward_full(self, lstm_out_list, first_notes, trees, train=True):
         # (batch_size, episode_len, 17)
         scores = []
-        for max_len in range(2, trees.size(1)):
+        for max_len in range(2, trees.size(1) + 1):
             tree_sum = []
             for i, (note, tree) in enumerate(zip(first_notes, trees)):
                 start_idx = -1
@@ -243,8 +181,7 @@ class Discriminator(nn.Module):
                 summary = self.attentional_recent_discriminator(tree[start_idx:max(max_len, start_idx + 1), :], lstm_out_list[i], note)
                 tree_sum.append(summary)
 
-            ff_out = self.ff_model(torch.cat(tree_sum, dim=0))
-            score = self.tail_score(ff_out)
+            score = self.tail_score(torch.cat(tree_sum, dim=0))
             # (batch_size, 1)
             scores.append(score)
         return torch.cat(scores, dim=1)
@@ -278,14 +215,13 @@ class Generator(nn.Module):
         self.code_lstm = nn.LSTM(self.embed_dim, self.note_dim, 2)
         self.next_note = nn.Linear(self.note_dim * 3, self.note_dim)
         self.ff_attention = nn.Sequential(
-            nn.Linear(self.embed_dim * 5, self.embed_dim * 3),
-            nn.ReLU(),
-            nn.Linear(self.embed_dim * 3, self.embed_dim * 1),
-            nn.ReLU()
+            nn.Linear(self.embed_dim * 5, self.embed_dim * 2),
+            nn.Linear(self.embed_dim * 2, self.embed_dim * 1),
+            nn.Tanh()
         )
         self.ff_combine = nn.Sequential(
             nn.Linear(self.embed_dim * 2, self.note_dim),
-            nn.ReLU()
+            nn.LeakyReLU()
         )
         self.predict_type = nn.Sequential(
             nn.Linear(self.note_dim, prime_type_num),
@@ -324,7 +260,8 @@ class Generator(nn.Module):
             result = dist.sample()
         else:
             _, result = torch.max(prob.view(-1), 0)
-        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).expand(prob.size(0), 1).cuda(), prob[:, result]
+        sp = torch.stack([prob[i, result[i]].view(1) for i in range(prob.size(0))])
+        return result.reshape(prob.size(0), 1) + torch.LongTensor([offset]).expand(prob.size(0), 1).cuda(), sp
 
     def tree_attention(self, trees, first_notes, train):
         embedded_code = self.type_embedding(trees[:, :, 2])
